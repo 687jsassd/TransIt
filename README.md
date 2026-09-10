@@ -1,5 +1,11 @@
 # TransIt — Mtools 翻译文件 AI 精翻流水线
 
+[![Release](https://img.shields.io/github/v/release/687jsassd/TransIt?color=7c5cff&label=release)](https://github.com/687jsassd/TransIt/releases)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows-38bdf8.svg)](#快速开始推荐webui)
+[![Python](https://img.shields.io/badge/python-3.8%2B-3776ab.svg)](#方式二源码运行开发改代码)
+[![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](TransIt.spec)
+
 从游戏（如 RPG Maker）导出的翻译文件往往是 `{原文: 译文}` 的 JSON 键值对
 （Mtools `ManualTransFile.json` 格式）。本工具读取这类文件，自动完成：
 

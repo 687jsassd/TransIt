@@ -1,0 +1,89 @@
+name: Release
+
+# 推一个 v* 标签即自动构建便携版并挂到 Release；
+# 也可以在 Actions 页面手动触发（workflow_dispatch）只构建、不上传。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装 PyInstaller（仅构建期依赖，运行期零依赖）
+        run: python -m pip install --disable-pip-version-check pyinstaller
+
+      - name: 校验版本号与标签是否一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ver = (python -c "import sys;sys.path.insert(0,'.');from transit import __version__;print(__version__)").Trim()
+          $tag = $env:GITHUB_REF_NAME
+          Write-Host "代码版本 = $ver，标签 = $tag"
+          if ($tag -ne "v$ver") {
+            Write-Error "标签 $tag 与 transit/__init__.py 的 __version__ ($ver) 不一致，请先改版本号再打标签"
+            exit 1
+          }
+
+      # 含完整的构建期门禁：配置模板一致性、样例分支覆盖、
+      # 冻结后数据目录、WebUI 冒烟测试（默认无令牌放行 + Host/Origin 拒绝 + 可选令牌）
+      - name: 构建便携版
+        shell: pwsh
+        run: pwsh -NoProfile -File build.ps1
+
+      - name: 构建产物清单
+        shell: pwsh
+        run: |
+          Get-ChildItem release | Format-Table Name, Length
+          Get-Content release/SHA256SUMS.txt
+
+      - name: 上传到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          $tag  = $env:GITHUB_REF_NAME
+          $ver  = (python -c "import sys;sys.path.insert(0,'.');from transit import __version__;print(__version__)").Trim()
+
+          # 已有 Release（手工建的）就追加附件，没有就按标签创建
+          gh release view $tag --repo $repo 2>$null | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Release $tag 不存在，创建中…"
+            gh release create $tag --repo $repo --verify-tag --title "TransIt $tag" --generate-notes
+            if ($LASTEXITCODE -ne 0) { Write-Error "创建 Release 失败"; exit 1 }
+          }
+
+          $zip = "release/TransIt-$ver-win64.zip"
+          if (-not (Test-Path $zip)) { Write-Error "找不到构建产物 $zip"; exit 1 }
+
+          gh release upload $tag --repo $repo --clobber `
+            (Resolve-Path $zip).Path `
+            (Resolve-Path release/SHA256SUMS.txt).Path
+          if ($LASTEXITCODE -ne 0) { Write-Error "上传附件失败"; exit 1 }
+          Write-Host "已上传 $zip 与 SHA256SUMS.txt 到 $tag"
+
+      - name: 保留构建产物（便于手动触发时下载）
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: TransIt-win64
+          path: |
+            release/TransIt-*-win64.zip
+            release/SHA256SUMS.txt
+          retention-days: 14
