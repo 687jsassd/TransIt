@@ -206,9 +206,9 @@ TransIt/
 │   ├── translator.py      # 批量精翻（并发/续传/占位符）
 │   └── writer.py          # 导出
 ├── web/index.html         # WebUI 前端（单文件，无外链）
-├── assets/transit.ico     # 应用图标（由 tools/make_icon.py 生成）
+├── assets/                # 应用图标（tools/make_icon.py）与社交预览图
 ├── packaging/使用说明.txt  # 面向最终用户的说明（随发布包分发）
-├── tools/                 # 构建辅助脚本（图标/版本资源/配置模板/样例校验）
+├── tools/                 # 构建辅助：图标/版本资源/配置模板/样例校验/预览图
 ├── TransIt.spec           # PyInstaller 构建配置
 ├── build.ps1              # 一键构建 + 冒烟测试 + 打包
 ├── LICENSE                # MIT
