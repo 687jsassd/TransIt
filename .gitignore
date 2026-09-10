@@ -1,0 +1,29 @@
+# ---------------- 运行时数据（含明文 API Key，严禁入库 / 入包） ----------------
+config.json
+output/
+uploads/
+
+# ---------------- Python ----------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---------------- 构建产物 ----------------
+build/
+dist/
+release/
+
+# ---------------- 测试与临时残留 ----------------
+_t_edge_profile/
+_t_*.png
+*.translate.log
+
+# ---------------- 示例目录里的生成物（只保留原始样本） ----------------
+示例翻译文件/*.progress.json
+示例翻译文件/*.translated*.json
+示例翻译文件/*.glossary.json
+
+# 注意：TransIt.spec 是构建输入，需要入库，不要忽略 *.spec

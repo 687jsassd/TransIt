@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>TransIt — 游戏翻译工作台</title>
+<style>
+:root{
+  --bg:#0d1017; --panel:#151924; --panel2:#1a1f2e; --border:#262d3f;
+  --text:#e8eaf2; --muted:#8b93a7; --accent:#7c5cff; --accent2:#38bdf8;
+  --ok:#34d399; --warn:#fbbf24; --err:#f87171;
+  --radius:12px; --shadow:0 8px 28px rgba(0,0,0,.4);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--text); min-height:100vh;
+  font-family:"Segoe UI","Microsoft YaHei",-apple-system,sans-serif;
+  font-size:14px; line-height:1.5;
+}
+/* ---------- 顶栏 ---------- */
+header{
+  display:flex; align-items:center; gap:14px; padding:14px 22px;
+  background:linear-gradient(135deg,rgba(124,92,255,.14),rgba(56,189,248,.08));
+  border-bottom:1px solid var(--border);
+  position:sticky; top:0; z-index:50; backdrop-filter:blur(8px);
+}
+.logo{display:flex;align-items:center;gap:10px;font-size:19px;font-weight:700;letter-spacing:.5px}
+.logo .mark{
+  width:34px;height:34px;border-radius:10px;display:grid;place-items:center;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  font-size:17px;box-shadow:0 4px 14px rgba(124,92,255,.4);
+}
+.badge{
+  padding:3px 10px;border-radius:99px;font-size:12px;font-weight:600;
+  background:var(--panel2);border:1px solid var(--border);color:var(--muted);
+}
+.badge.hash{font-family:Consolas,monospace;color:var(--accent2);border-color:rgba(56,189,248,.3)}
+.spacer{flex:1}
+/* ---------- 布局 ---------- */
+main{max-width:1280px;margin:0 auto;padding:18px 22px 90px}
+.tabs{display:flex;gap:6px;margin-bottom:16px}
+.tab{
+  padding:9px 20px;border-radius:10px;cursor:pointer;font-weight:600;color:var(--muted);
+  border:1px solid transparent;background:transparent;transition:.15s;font-size:14px;
+}
+.tab:hover{color:var(--text);background:var(--panel)}
+.tab.active{color:#fff;background:linear-gradient(135deg,rgba(124,92,255,.25),rgba(56,189,248,.15));border-color:rgba(124,92,255,.45)}
+.view{display:none}
+.view.active{display:block;animation:fade .18s ease}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.card{
+  background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px 18px;margin-bottom:14px;
+}
+.card h3{font-size:14px;margin-bottom:12px;color:var(--text);display:flex;align-items:center;gap:8px}
+.card h3::before{content:"";width:3px;height:14px;border-radius:2px;background:linear-gradient(var(--accent),var(--accent2))}
+/* ---------- 控件 ---------- */
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+input[type=text],input[type=password],input[type=number],select,textarea{
+  background:var(--panel2);border:1px solid var(--border);border-radius:8px;
+  color:var(--text);padding:8px 10px;font-size:13px;outline:none;transition:.15s;
+  font-family:inherit;
+}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,92,255,.15)}
+textarea{resize:vertical;width:100%}
+label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+label.f input,label.f select{width:100%}
+.btn{
+  padding:8px 16px;border-radius:9px;border:1px solid var(--border);cursor:pointer;
+  background:var(--panel2);color:var(--text);font-weight:600;font-size:13px;transition:.15s;
+  display:inline-flex;align-items:center;gap:6px;
+}
+.btn:hover{border-color:var(--accent);transform:translateY(-1px)}
+.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.btn.primary{
+  background:linear-gradient(135deg,var(--accent),#9d7bff);border:none;color:#fff;
+  box-shadow:0 4px 14px rgba(124,92,255,.35);
+}
+.btn.primary:hover{box-shadow:0 6px 20px rgba(124,92,255,.5)}
+.btn.cyan{background:linear-gradient(135deg,#0891b2,var(--accent2));border:none;color:#fff}
+.btn.danger{background:rgba(248,113,113,.12);border-color:rgba(248,113,113,.4);color:var(--err)}
+.btn.ok{background:rgba(52,211,153,.12);border-color:rgba(52,211,153,.4);color:var(--ok)}
+.btn.sm{padding:5px 12px;font-size:12px}
+/* ---------- 统计卡 ---------- */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.stat{
+  background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px 16px;position:relative;overflow:hidden;
+}
+.stat .num{font-size:24px;font-weight:700;font-family:Consolas,monospace}
+.stat .lbl{font-size:12px;color:var(--muted);margin-top:2px}
+.stat::after{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:var(--c,var(--accent))}
+/* ---------- 进度条 ---------- */
+.pwrap{margin:6px 0 10px}
+.pbar{height:14px;background:var(--panel2);border:1px solid var(--border);border-radius:99px;overflow:hidden}
+.pfill{
+  height:100%;width:0%;border-radius:99px;transition:width .4s ease;
+  background:linear-gradient(90deg,var(--accent),var(--accent2));
+  box-shadow:0 0 12px rgba(124,92,255,.6);
+  background-size:200% 100%;animation:shimmer 2s linear infinite;
+}
+@keyframes shimmer{to{background-position:-200% 0}}
+.ptext{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:6px;font-family:Consolas,monospace}
+/* ---------- 日志 ---------- */
+.logbox{
+  background:#0a0d13;border:1px solid var(--border);border-radius:10px;
+  height:300px;overflow-y:auto;padding:10px 12px;font-family:Consolas,"Courier New",monospace;
+  font-size:12.5px;line-height:1.7;
+}
+.logbox .l{white-space:pre-wrap;word-break:break-all}
+.logbox .ts{color:#56617a;margin-right:8px}
+.logbox .err{color:var(--err)} .logbox .warn{color:var(--warn)} .logbox .ok{color:var(--ok)}
+/* ---------- 表格 ---------- */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{
+  text-align:left;padding:8px 10px;color:var(--muted);font-weight:600;font-size:12px;
+  border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--panel);z-index:2;
+}
+td{padding:7px 10px;border-bottom:1px solid rgba(38,45,63,.55);vertical-align:top;word-break:break-all}
+tr:hover td{background:rgba(124,92,255,.05)}
+.tblwrap{max-height:520px;overflow:auto;border:1px solid var(--border);border-radius:10px}
+.tblwrap table{border-collapse:separate;border-spacing:0}
+td.editable{cursor:pointer}
+td.editable:hover{background:rgba(56,189,248,.08)}
+.cat-tag{font-size:11px;padding:2px 8px;border-radius:6px;background:rgba(124,92,255,.15);color:#b7a6ff;white-space:nowrap}
+/* ---------- 弹窗 ---------- */
+.modal{
+  display:none;position:fixed;inset:0;background:rgba(5,8,14,.72);z-index:100;
+  align-items:center;justify-content:center;backdrop-filter:blur(4px);
+}
+.modal.show{display:flex}
+.mbox{
+  background:var(--panel);border:1px solid var(--border);border-radius:14px;
+  padding:20px;width:min(680px,92vw);max-height:86vh;overflow:auto;box-shadow:var(--shadow);
+}
+.mbox h4{margin-bottom:14px;font-size:15px}
+/* ---------- 文件浏览器 ---------- */
+.fb-path{display:flex;gap:6px;margin-bottom:10px}
+.fb-list{max-height:340px;overflow:auto;border:1px solid var(--border);border-radius:8px}
+.fb-item{padding:7px 12px;cursor:pointer;border-bottom:1px solid rgba(38,45,63,.4);display:flex;justify-content:space-between;gap:10px}
+.fb-item:hover{background:rgba(124,92,255,.1)}
+.fb-item .sz{color:var(--muted);font-size:12px;font-family:Consolas,monospace}
+.drives{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+/* ---------- 设置 ---------- */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+.hint{font-size:12px;color:var(--muted);margin-top:4px}
+.kv{font-family:Consolas,monospace;font-size:12px;color:var(--muted)}
+.switch{position:relative;width:40px;height:22px;flex:none}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;inset:0;background:var(--panel2);border:1px solid var(--border);border-radius:99px;cursor:pointer;transition:.2s}
+.slider::before{content:"";position:absolute;width:16px;height:16px;left:2px;top:2px;border-radius:50%;background:var(--muted);transition:.2s}
+.switch input:checked+.slider{background:linear-gradient(135deg,var(--accent),var(--accent2));border-color:transparent}
+.switch input:checked+.slider::before{transform:translateX(18px);background:#fff}
+.pager{display:flex;gap:8px;align-items:center;margin-top:10px;justify-content:center}
+.toast{
+  position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);
+  background:var(--panel);border:1px solid var(--accent);border-radius:10px;
+  padding:10px 20px;font-size:13px;box-shadow:var(--shadow);transition:.25s;z-index:200;opacity:0;
+}
+.toast.show{transform:translateX(-50%) translateY(0);opacity:1}
+.statusdot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:6px}
+footer{
+  position:fixed;bottom:0;left:0;right:0;background:rgba(13,16,23,.92);backdrop-filter:blur(8px);
+  border-top:1px solid var(--border);padding:9px 22px;display:flex;align-items:center;gap:16px;z-index:60;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo"><div class="mark">🌐</div>TransIt</div>
+  <span class="badge" id="hdTask">待命</span>
+  <span class="badge hash" id="hdHash" style="display:none"></span>
+  <div class="spacer"></div>
+  <span class="kv" id="hdModel"></span>
+</header>
+
+<main>
+  <div class="tabs">
+    <button class="tab active" data-v="vHome">⚙ 工作台</button>
+    <button class="tab" data-v="vGlossary">📚 术语库</button>
+    <button class="tab" data-v="vReview">✏️ 译文修正</button>
+    <button class="tab" data-v="vSettings">🔌 设置</button>
+  </div>
+
+  <!-- ============ 工作台 ============ -->
+  <section class="view active" id="vHome">
+    <div class="card" id="fileCard">
+      <h3>输入文件（Mtools 导出的翻译 JSON）</h3>
+      <div class="row">
+        <input type="text" id="fileInput" placeholder="路径或直接把 .json 文件拖进来…" style="flex:1;min-width:300px">
+        <input type="file" id="filePick" accept=".json,application/json" style="display:none">
+        <button class="btn" id="btnPick">📂 选择文件…</button>
+        <button class="btn" id="btnBrowse">🗂 浏览目录</button>
+        <button class="btn primary" id="btnLoad">读取</button>
+      </div>
+      <div class="hint" id="dropHint" style="border:1.5px dashed var(--border);border-radius:10px;padding:14px 16px;margin-top:10px;text-align:center;color:var(--muted);transition:.2s">
+        📥 将 <b>ManualTransFile.json</b> 拖拽到此处直接打开（无需输入路径）
+      </div>
+      <div id="recentWrap" style="margin-top:8px;display:none">
+        <span class="kv" style="margin-right:6px">最近打开：</span>
+        <span id="recentChips"></span>
+      </div>
+      <div class="hint">按文件内容 hash 隔离输出 —— 不同游戏的 ManualTransFile.json 互不覆盖、互不串译。</div>
+    </div>
+
+    <div class="stats">
+      <div class="stat" style="--c:#38bdf8"><div class="num" id="stTotal">—</div><div class="lbl">总条目</div></div>
+      <div class="stat" style="--c:#fbbf24"><div class="num" id="stNeed">—</div><div class="lbl">待翻译</div></div>
+      <div class="stat" style="--c:#34d399"><div class="num" id="stProg">—</div><div class="lbl">已完成译文</div></div>
+      <div class="stat" style="--c:#8b93a7"><div class="num" id="stSkip">—</div><div class="lbl">原样保留（ID/代码）</div></div>
+      <div class="stat" style="--c:#7c5cff"><div class="num" id="stTerms">—</div><div class="lbl">术语库词条</div></div>
+    </div>
+
+    <div class="card">
+      <h3>流水线</h3>
+      <div class="row" style="margin-bottom:12px">
+        <button class="btn cyan" id="btnAnalyze" disabled>① 分析世界观 · 建术语库</button>
+        <button class="btn primary" id="btnTranslate" disabled>② 开始翻译</button>
+        <button class="btn ok" id="btnPolish" disabled>✨ 精修润色</button>
+        <button class="btn" id="btnExport" disabled>③ 导出成品</button>
+        <button class="btn danger" id="btnStop" disabled>⏹ 停止</button>
+        <div class="spacer"></div>
+        <label class="f" style="width:110px">测试条数（0=全部）
+          <input type="number" id="optLimit" value="0" min="0">
+        </label>
+        <label class="f" style="width:150px">翻译后自动精修
+          <select id="optPolish"><option value="0">关闭</option><option value="1">开启</option></select>
+        </label>
+      </div>
+      <div class="pwrap">
+        <div class="pbar"><div class="pfill" id="pfill"></div></div>
+        <div class="ptext"><span id="ptLeft">就绪</span><span id="ptRight"></span></div>
+      </div>
+      <div class="hint" id="tokenInfo"></div>
+    </div>
+
+    <div class="card">
+      <h3>运行日志</h3>
+      <div class="logbox" id="logBox"></div>
+    </div>
+  </section>
+
+  <!-- ============ 术语库 ============ -->
+  <section class="view" id="vGlossary">
+    <div class="card">
+      <h3>世界观 / 翻译注意（注入每次翻译的上下文）</h3>
+      <textarea id="gvWorldview" rows="3" placeholder="世界观概述…"></textarea>
+      <div style="height:8px"></div>
+      <textarea id="gvNotes" rows="2" placeholder="翻译注意事项（语气、称呼、尺度处理…）"></textarea>
+    </div>
+    <div class="card">
+      <h3>术语词条 <span class="badge" id="gvCount">0</span></h3>
+      <div class="row" style="margin-bottom:10px">
+        <input type="text" id="gvSearch" placeholder="搜索原文/译文…" style="flex:1;max-width:340px">
+        <button class="btn sm" id="btnGvAdd">＋ 新增词条</button>
+        <button class="btn sm danger" id="btnGvDelSel">－ 删除选中</button>
+        <div class="spacer"></div>
+        <button class="btn primary sm" id="btnGvSave">💾 保存术语库</button>
+      </div>
+      <div class="tblwrap" style="max-height:480px">
+        <table id="gvTable">
+          <thead><tr><th style="width:34px"><input type="checkbox" id="gvChkAll"></th><th style="width:130px">分类</th><th style="width:38%">原文</th><th>译文</th></tr></thead>
+          <tbody id="gvBody"></tbody>
+        </table>
+      </div>
+      <div class="hint">双击单元格直接编辑；保存时自动做合法性过滤（去括号注释等）。术语库按文件 hash 存放在 output/ 下。</div>
+    </div>
+  </section>
+
+  <!-- ============ 译文修正 ============ -->
+  <section class="view" id="vReview">
+    <div class="card">
+      <h3>译文逐句修正（双击译文列编辑，即时写回进度文件）</h3>
+      <div class="row" style="margin-bottom:10px">
+        <input type="text" id="rvSearch" placeholder="搜索原文或译文…" style="flex:1;max-width:360px">
+        <button class="btn sm" id="btnRvSearch">查找</button>
+        <label class="row" style="gap:6px;font-size:12px;color:var(--muted)">
+          <input type="checkbox" id="rvUntrans" style="accent-color:var(--accent)"> 只看未翻译
+        </label>
+        <div class="spacer"></div>
+        <span class="kv" id="rvTotal"></span>
+      </div>
+      <div class="tblwrap">
+        <table>
+          <thead><tr><th style="width:44%">原文</th><th>当前译文（双击编辑）</th></tr></thead>
+          <tbody id="rvBody"></tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <button class="btn sm" id="rvPrev">‹ 上一页</button>
+        <span class="kv" id="rvPage"></span>
+        <button class="btn sm" id="rvNext">下一页 ›</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 设置 ============ -->
+  <section class="view" id="vSettings">
+    <div class="card">
+      <h3>API（OpenAI 兼容）</h3>
+      <div class="grid2">
+        <label class="f">Base URL<input type="text" id="setBase"></label>
+        <label class="f">API Key<input type="password" id="setKey" placeholder="sk-…"></label>
+        <label class="f">模型<input type="text" id="setModel" placeholder="deepseek-ai/DeepSeek-V4-Flash"></label>
+        <label class="f">温度（翻译建议 0.2~0.5）<input type="number" id="setTemp" step="0.1" min="0" max="2"></label>
+        <label class="f">max_tokens<input type="number" id="setMaxTok" step="256"></label>
+        <label class="f">请求超时（秒）<input type="number" id="setTimeout" step="10"></label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label class="row" style="gap:8px;font-size:13px">禁用思考模式（翻译任务强烈建议开启）
+          <span class="switch"><input type="checkbox" id="setThinking" checked><span class="slider"></span></span>
+        </label>
+        <div class="spacer"></div>
+        <button class="btn sm cyan" id="btnTestLLM">⚡ 测试连接</button>
+        <span class="kv" id="testResult"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h3>流水线参数</h3>
+      <div class="grid3">
+        <label class="f">并发数（SiliconFlow 实测 6 最优）<input type="number" id="setConc" min="1" max="32"></label>
+        <label class="f">批大小（条/请求）<input type="number" id="setBatch" min="1" max="60"></label>
+        <label class="f">最大重试<input type="number" id="setRetries" min="0" max="10"></label>
+        <label class="f">分析采样数<input type="number" id="setSample" min="30" max="1000"></label>
+        <label class="f">输出目录<input type="text" id="setOutDir"></label>
+        <label class="f">上下文行数（组合句子翻译，0=关）<input type="number" id="setCtx" min="0" max="10"></label>
+      </div>
+    </div>
+    <div class="card">
+      <h3>翻译风格</h3>
+      <div class="grid3">
+        <label class="f">R18 风格
+          <select id="setR18"><option value="explicit">explicit（大胆露骨）</option><option value="moderate">moderate（忠实保守）</option></select>
+        </label>
+        <label class="f">名词风格
+          <select id="setNameStyle">
+            <option value="auto">auto（按角色气质）</option>
+            <option value="kawaii">kawaii（可爱化）</option>
+            <option value="simple">simple（简洁）</option>
+            <option value="transliterate">transliterate（标准音译）</option>
+          </select>
+        </label>
+        <label class="f">精修阈值（字符，长句才润色）<input type="number" id="setPolishThr" min="0"></label>
+      </div>
+      <div style="margin-top:10px">
+        <label class="f">自定义提示词（附加到每条翻译指令末尾）
+          <textarea id="setCustomPrompt" rows="3" placeholder="例：风格更文艺；「○○」一律译作「××」…"></textarea>
+        </label>
+      </div>
+    </div>
+    <div class="row">
+      <button class="btn primary" id="btnSaveSettings">💾 保存全部设置</button>
+      <span class="kv">保存后立即生效（写入 config.json）</span>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span id="ftStatus"><span class="statusdot" style="background:var(--muted)"></span>就绪</span>
+  <span class="kv" id="ftDetail"></span>
+  <div class="spacer"></div>
+  <span class="kv" id="ftSpeed"></span>
+  <span class="kv" id="ftFile"></span>
+</footer>
+
+<!-- 文件浏览弹窗 -->
+<div class="modal" id="fbModal">
+  <div class="mbox">
+    <h4>选择翻译文件</h4>
+    <div class="fb-path">
+      <input type="text" id="fbCur" placeholder="输入路径回车跳转…" style="flex:1">
+      <button class="btn sm" id="fbUp">⬆ 上级</button>
+    </div>
+    <div class="drives" id="fbDrives"></div>
+    <div class="fb-list" id="fbList"></div>
+    <div class="row" style="margin-top:12px;justify-content:flex-end">
+      <button class="btn sm" onclick="closeModal('fbModal')">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 译文编辑弹窗 -->
+<div class="modal" id="rvModal">
+  <div class="mbox">
+    <h4>修正译文</h4>
+    <label class="f" style="margin-bottom:10px">原文
+      <textarea id="rvSrcBox" rows="3" readonly style="opacity:.75"></textarea>
+    </label>
+    <label class="f" style="margin-bottom:14px">译文（修改后保存）
+      <textarea id="rvDstBox" rows="4"></textarea>
+    </label>
+    <div class="row" style="justify-content:flex-end">
+      <button class="btn sm" onclick="closeModal('rvModal')">取消</button>
+      <button class="btn primary sm" id="rvSave">💾 保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+/* ================= 工具 ================= */
+const $ = id => document.getElementById(id);
+const esc = s => String(s??"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2200); }
+/* 本地接口令牌：启动时随 URL 片段传来（#token=xxx）。存入 sessionStorage 后立刻
+   从地址栏抹掉，之后所有 /api/* 请求带 X-TransIt-Token 头。 */
+const API_TOKEN = (() => {
+  const m = location.hash.match(/[#&]token=([A-Za-z0-9_\-]+)/);
+  let t = m ? m[1] : (sessionStorage.getItem("transit_token") || "");
+  if (m) {
+    sessionStorage.setItem("transit_token", t);
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+  return t;
+})();
+async function api(path, body){
+  const headers = {"X-TransIt-Token": API_TOKEN};
+  if(body!==undefined) headers["Content-Type"] = "application/json";
+  const opt = body!==undefined
+    ? {method:"POST", headers, body:JSON.stringify(body)}
+    : {headers};
+  const r = await fetch(path, opt);
+  if(r.status===403) throw new Error("访问令牌无效或缺失：请关闭本页，用启动程序时自动打开的链接访问");
+  const j = await r.json().catch(()=>({error:"响应解析失败"}));
+  if(!r.ok || j.error) throw new Error(j.error || ("HTTP "+r.status));
+  return j;
+}
+function fmtSize(n){ return n>1048576 ? (n/1048576).toFixed(1)+" MB" : n>1024 ? (n/1024).toFixed(0)+" KB" : n+" B"; }
+function fmtEta(s){ if(s==null) return ""; const m=Math.floor(s/60); return m>0 ? `${m} 分 ${Math.round(s%60)} 秒` : `${Math.round(s)} 秒`; }
+function fmtNum(n){ return (n??0).toLocaleString("en-US"); }
+
+/* ================= 标签页 ================= */
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
+  document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));
+  t.classList.add("active"); $(t.dataset.v).classList.add("active");
+  if(t.dataset.v==="vGlossary") renderGlossary();
+  if(t.dataset.v==="vReview") loadEntries();
+});
+function openModal(id){ $(id).classList.add("show"); }
+function closeModal(id){ $(id).classList.remove("show"); }
+
+/* ================= 全局状态 ================= */
+let S = null;            // /api/state 结果
+let logCursor = 0;
+let settingsFilled = false;
+let gvEditCache = null;  // 术语库编辑缓存 {cat:{src:dst}}
+let rvPage = 1, rvEditingSrc = null;
+
+const TASK_CN = {analyze:"分析建库", translate:"批量翻译", polish:"精修润色", export:"导出"};
+const STATUS_CN = {idle:"待命", running:"运行中", done:"已完成", stopped:"已停止", error:"失败"};
+const STATUS_COLOR = {idle:"#8b93a7", running:"#38bdf8", done:"#34d399", stopped:"#fbbf24", error:"#f87171"};
+
+/* ================= 轮询 ================= */
+async function pollState(){
+  try{
+    S = await api("/api/state");
+    renderState();
+  }catch(e){ /* 服务器重启中，忽略 */ }
+}
+async function pollLogs(){
+  try{
+    const j = await api("/api/logs?since="+logCursor);
+    if(j.logs.length){
+      const box = $("logBox");
+      const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+      for(const e of j.logs){
+        const div = document.createElement("div");
+        div.className = "l " + (e.level==="error"?"err":e.level==="warn"?"warn":"");
+        div.innerHTML = `<span class="ts">${e.ts}</span>${esc(e.msg)}`;
+        box.appendChild(div);
+      }
+      logCursor = j.cursor;
+      while(box.children.length > 800) box.removeChild(box.firstChild);
+      if(nearBottom) box.scrollTop = box.scrollHeight;
+    }
+  }catch(e){}
+}
+
+/* ================= 渲染主状态 ================= */
+function renderState(){
+  if(!S) return;
+  const f = S.file, t = S.task;
+  // 顶栏
+  $("hdTask").textContent = (t.status==="running"?"⏳ ":"")+STATUS_CN[t.status] + (t.status==="running" && t.type ? ` · ${TASK_CN[t.type]||t.type}` : "");
+  $("hdModel").textContent = S.config.api.model || "";
+  if(f.loaded){
+    $("hdHash").style.display=""; $("hdHash").textContent = "hash "+f.hash;
+    $("stTotal").textContent = fmtNum(f.total);
+    $("stNeed").textContent = fmtNum(f.need);
+    $("stProg").textContent = fmtNum(f.has_progress);
+    $("stSkip").textContent = fmtNum(f.passthrough);
+    $("ftFile").textContent = f.path ? f.path.split(/[\\/]/).pop() : "";
+  }
+  $("stTerms").textContent = S.glossary.exists ? fmtNum(S.glossary.terms_count) : "—";
+  // 进度
+  const running = t.status==="running";
+  let pct = t.total>0 ? Math.min(100, t.done/t.total*100) : 0;
+  $("pfill").style.width = (running? Math.max(pct, 2) : (t.status==="done"?100:pct)) + "%";
+  $("ptLeft").textContent = running
+    ? `${TASK_CN[t.type]||"任务中"}：${fmtNum(t.done)} / ${fmtNum(t.total)}（${pct.toFixed(1)}%）`
+    : (t.status==="done" ? "任务完成" : t.status==="error" ? ("失败：" + (t.error||"")) : t.status==="stopped" ? "已停止（进度已保存，可续跑）" : "就绪");
+  $("ptRight").textContent = running && t.total>0 ? `${t.speed||0} 条/分 · 剩余 ${fmtEta(t.eta_sec)}` : "";
+  $("ftStatus").innerHTML = `<span class="statusdot" style="background:${STATUS_COLOR[t.status]}"></span>${STATUS_CN[t.status]}${running?` · ${TASK_CN[t.type]||""}`:""}`;
+  $("ftDetail").textContent = running ? (t.detail||"") : "";
+  $("ftSpeed").textContent = running && t.total>0 ? `${t.speed||0} 条/分 · ETA ${fmtEta(t.eta_sec)}` : "";
+  // token
+  if(S.tokens && S.tokens.total>0)
+    $("tokenInfo").textContent = `本次会话 API 用量：请求 ${S.tokens.requests} 次 · ${fmtNum(S.tokens.total)} tokens（输入 ${fmtNum(S.tokens.prompt)} / 输出 ${fmtNum(S.tokens.completion)}）`;
+  // 按钮状态
+  const hasFile = f.loaded, runningX = running;
+  $("btnAnalyze").disabled = !hasFile || runningX;
+  $("btnTranslate").disabled = !hasFile || runningX;
+  $("btnPolish").disabled = !hasFile || runningX;
+  $("btnExport").disabled = !hasFile || runningX;
+  $("btnStop").disabled = !runningX;
+  // 设置只填一次
+  if(!settingsFilled){ fillSettings(); settingsFilled = true; }
+}
+
+/* ================= 文件加载 ================= */
+$("btnLoad").onclick = async () => {
+  const p = $("fileInput").value.trim();
+  if(!p) return toast("请先选择文件路径");
+  try{
+    const j = await api("/api/file", {path:p});
+    toast(`已加载：${fmtNum(j.file.total)} 条，待译 ${fmtNum(j.file.need)} 条`);
+    renderState();
+    renderRecent();
+  }catch(e){ toast("加载失败："+e.message); }
+};
+$("fileInput").addEventListener("keydown", e => { if(e.key==="Enter") $("btnLoad").click(); });
+
+/* ---- 原生文件选择器（读内容上传，无需路径） ---- */
+$("btnPick").onclick = () => $("filePick").click();
+$("filePick").onchange = async e => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = "";   // 允许重复选同一文件
+  if(f) await uploadJsonFile(f);
+};
+async function uploadJsonFile(file){
+  if(!/\.json$/i.test(file.name)) return toast("请选择 .json 文件");
+  if(file.size > 200*1024*1024) return toast("文件超过 200MB");
+  toast(`正在读取 ${file.name}（${fmtSize(file.size)}）…`);
+  try{
+    const content = await file.text();
+    const j = await api("/api/upload", {name: file.name, content});
+    $("fileInput").value = j.stored_path || "";
+    toast(`✅ 已打开 ${j.name}：${fmtNum(j.file.total)} 条，待译 ${fmtNum(j.file.need)} 条`);
+    renderState(); renderRecent();
+  }catch(e){ toast("打开失败："+e.message); }
+}
+
+/* ---- 拖拽打开 ---- */
+(function(){
+  const card = $("fileCard"), hint = $("dropHint");
+  let dragDepth = 0;
+  card.addEventListener("dragenter", ev => { ev.preventDefault(); dragDepth++; hint.style.borderColor="var(--accent)"; hint.style.background="rgba(124,92,255,.08)"; hint.style.color="var(--text)"; });
+  card.addEventListener("dragover", ev => { ev.preventDefault(); });
+  card.addEventListener("dragleave", ev => { ev.preventDefault(); if(--dragDepth<=0){ dragDepth=0; hint.style.borderColor=""; hint.style.background=""; hint.style.color=""; } });
+  card.addEventListener("drop", ev => {
+    ev.preventDefault(); dragDepth = 0;
+    hint.style.borderColor=""; hint.style.background=""; hint.style.color="";
+    const f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+    if(f) uploadJsonFile(f);
+  });
+})();
+
+/* ---- 最近文件 ---- */
+function renderRecent(){
+  if(!S) return;
+  const rec = (S.recent||[]).filter(r => r.exists);
+  const wrap = $("recentWrap");
+  if(!rec.length){ wrap.style.display="none"; return; }
+  wrap.style.display="";
+  const chips = $("recentChips"); chips.innerHTML = "";
+  rec.slice(0,6).forEach(r => {
+    const b = document.createElement("button");
+    b.className = "btn sm";
+    b.title = r.path;
+    b.innerHTML = `🕐 ${esc(r.name)}`;
+    b.onclick = async () => {
+      try{
+        const j = await api("/api/file", {path:r.path});
+        $("fileInput").value = r.path;
+        toast(`已加载：${fmtNum(j.file.total)} 条，待译 ${fmtNum(j.file.need)} 条`);
+        renderState(); renderRecent();
+      }catch(e){ toast("加载失败："+e.message); }
+    };
+    chips.appendChild(b);
+  });
+}
+
+/* ---- 文件浏览器 ---- */
+$("btnBrowse").onclick = async () => { openModal("fbModal"); browsePath(localStorage.getItem("transit_lastDir") || ""); };
+async function browsePath(p){
+  try{
+    const j = await api("/api/browse", {path:p});
+    $("fbCur").value = j.cwd || "";
+    $("fbUp").style.display = j.parent ? "" : "none";
+    $("fbUp").onclick = () => browsePath(j.parent);
+    const dr = $("fbDrives"); dr.innerHTML = "";
+    if(j.cwd === "此电脑"){
+      (j.dirs||[]).forEach(d => {
+        const b = document.createElement("button"); b.className="btn sm"; b.textContent=d;
+        b.onclick = () => browsePath(d); dr.appendChild(b);
+      });
+    }
+    const list = $("fbList"); list.innerHTML = "";
+    (j.dirs||[]).forEach(d => {
+      if(j.cwd === "此电脑") return;
+      const div = document.createElement("div"); div.className="fb-item";
+      div.innerHTML = `<span>📁 ${esc(d)}</span>`;
+      div.onclick = () => browsePath(j.cwd.endsWith("\\") ? j.cwd + d : j.cwd + "\\" + d);
+      list.appendChild(div);
+    });
+    (j.files||[]).forEach(fi => {
+      const div = document.createElement("div"); div.className="fb-item";
+      div.innerHTML = `<span>📄 ${esc(fi.name)}</span><span class="sz">${fmtSize(fi.size)}</span>`;
+      div.onclick = () => {
+        const full = j.cwd.endsWith("\\") ? j.cwd + fi.name : j.cwd + "\\" + fi.name;
+        localStorage.setItem("transit_lastDir", j.cwd);
+        $("fileInput").value = full; closeModal("fbModal"); $("btnLoad").click();
+      };
+      list.appendChild(div);
+    });
+    if(j.cwd !== "此电脑") localStorage.setItem("transit_lastDir", j.cwd);
+  }catch(e){ toast("浏览失败："+e.message); }
+}
+$("fbCur").addEventListener("keydown", e => { if(e.key==="Enter") browsePath($("fbCur").value); });
+
+/* ================= 流水线按钮 ================= */
+$("btnAnalyze").onclick = async () => {
+  try{ await api("/api/analyze", {}); toast("分析任务已启动"); }
+  catch(e){ toast(e.message); }
+};
+$("btnTranslate").onclick = async () => {
+  try{
+    await api("/api/translate", {limit: +$("optLimit").value||0, polish: $("optPolish").value==="1"});
+    toast("翻译任务已启动");
+  }catch(e){ toast(e.message); }
+};
+$("btnPolish").onclick = async () => {
+  try{ await api("/api/polish", {}); toast("精修任务已启动"); }catch(e){ toast(e.message); }
+};
+$("btnExport").onclick = async () => {
+  try{ await api("/api/export", {}); toast("导出任务已启动"); }catch(e){ toast(e.message); }
+};
+$("btnStop").onclick = async () => { await api("/api/stop", {}); toast("停止信号已发送…"); };
+
+/* ================= 术语库 ================= */
+function renderGlossary(){
+  if(!S || !S.glossary.exists){ $("gvBody").innerHTML = `<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:30px">尚未加载术语库 —— 请先在工作台运行「分析世界观 · 建术语库」</td></tr>`; $("gvCount").textContent="0"; return; }
+  if(!gvEditCache) gvEditCache = JSON.parse(JSON.stringify(S.glossary.terms||{}));
+  $("gvWorldview").value = S.glossary.worldview || "";
+  $("gvNotes").value = S.glossary.translation_notes || "";
+  drawGvRows();
+}
+function drawGvRows(){
+  const q = ($("gvSearch").value||"").trim();
+  const body = $("gvBody"); body.innerHTML = "";
+  let n = 0;
+  const cats = gvEditCache || {};
+  for(const cat of Object.keys(cats)){
+    for(const src of Object.keys(cats[cat])){
+      const dst = cats[cat][src];
+      if(q && !src.includes(q) && !String(dst).includes(q)) continue;
+      n++;
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td><input type="checkbox" class="gv-chk" data-cat="${esc(cat)}" data-src="${esc(src)}" style="accent-color:var(--accent)"></td>
+        <td><span class="cat-tag">${esc(cat)}</span></td>
+        <td class="editable" data-cat="${esc(cat)}" data-src="${esc(src)}" data-f="src">${esc(src)}</td>
+        <td class="editable" data-cat="${esc(cat)}" data-src="${esc(src)}" data-f="dst">${esc(dst)}</td>`;
+      body.appendChild(tr);
+    }
+  }
+  $("gvCount").textContent = n;
+  body.querySelectorAll("td.editable").forEach(td => td.ondblclick = () => editGvCell(td));
+}
+function editGvCell(td){
+  const {cat, src, f} = td.dataset;
+  const old = f==="src" ? src : gvEditCache[cat][src];
+  td.contentEditable = "true"; td.focus();
+  const sel = window.getSelection(); sel.selectAllChildren(td);
+  const finish = () => {
+    td.contentEditable = "false";
+    const val = td.textContent.trim();
+    if(f==="src"){
+      if(val && val!==src){ const dst = gvEditCache[cat][src]; delete gvEditCache[cat][src]; gvEditCache[cat][val]=dst; }
+      else td.textContent = src;
+    }else{
+      if(val) gvEditCache[cat][src] = val; else { td.textContent = old; }
+    }
+  };
+  td.onblur = finish;
+  td.onkeydown = e => { if(e.key==="Enter"){ e.preventDefault(); td.blur(); } };
+}
+$("gvSearch").oninput = drawGvRows;
+$("btnGvAdd").onclick = () => {
+  if(!gvEditCache) gvEditCache = {};
+  const cat = prompt("分类（如 角色名/地名/专业术语）：", "角色名");
+  if(!cat) return;
+  const src = prompt("原文（日语）："); if(!src) return;
+  const dst = prompt("译文："); if(!dst) return;
+  gvEditCache[cat] = gvEditCache[cat]||{}; gvEditCache[cat][src] = dst;
+  drawGvRows();
+};
+$("btnGvDelSel").onclick = () => {
+  document.querySelectorAll(".gv-chk:checked").forEach(c => {
+    const {cat, src} = c.dataset;
+    if(gvEditCache[cat]) delete gvEditCache[cat][src];
+  });
+  drawGvRows();
+};
+$("gvChkAll").onchange = e => document.querySelectorAll(".gv-chk").forEach(c => c.checked = e.target.checked);
+$("btnGvSave").onclick = async () => {
+  try{
+    const j = await api("/api/glossary", {glossary:{
+      worldview: $("gvWorldview").value.trim(),
+      translation_notes: $("gvNotes").value.trim(),
+      terms: gvEditCache||{},
+    }});
+    toast(`术语库已保存：${j.terms_count} 词条`);
+    gvEditCache = null; S = await api("/api/state"); gvEditCache = JSON.parse(JSON.stringify(S.glossary.terms||{})); drawGvRows();
+  }catch(e){ toast("保存失败："+e.message); }
+};
+
+/* ================= 译文修正 ================= */
+async function loadEntries(){
+  const q = ($("rvSearch").value||"").trim();
+  const un = $("rvUntrans").checked ? 1 : 0;
+  try{
+    const j = await api(`/api/entries?q=${encodeURIComponent(q)}&page=${rvPage}&page_size=100&untranslated=${un}`);
+    $("rvTotal").textContent = `共 ${fmtNum(j.total)} 条`;
+    $("rvPage").textContent = `第 ${j.page} / ${Math.max(1, Math.ceil(j.total/j.page_size))} 页`;
+    const body = $("rvBody"); body.innerHTML = "";
+    if(!j.rows.length) body.innerHTML = `<tr><td colspan="2" style="color:var(--muted);text-align:center;padding:30px">无匹配条目</td></tr>`;
+    j.rows.forEach(r => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${esc(r.src)}</td><td class="editable ${r.cur?"":"x"}" style="${r.cur?"":"color:var(--muted)"}">${esc(r.cur)||"<i>（未翻译，点击填写）</i>"}</td>`;
+      tr.querySelector("td.editable").ondblclick = () => {
+        rvEditingSrc = r.src;
+        $("rvSrcBox").value = r.src; $("rvDstBox").value = r.cur;
+        openModal("rvModal"); $("rvDstBox").focus();
+      };
+      body.appendChild(tr);
+    });
+  }catch(e){ toast("加载条目失败："+e.message); }
+}
+$("btnRvSearch").onclick = () => { rvPage=1; loadEntries(); };
+$("rvSearch").addEventListener("keydown", e => { if(e.key==="Enter"){ rvPage=1; loadEntries(); } });
+$("rvUntrans").onchange = () => { rvPage=1; loadEntries(); };
+$("rvPrev").onclick = () => { if(rvPage>1){ rvPage--; loadEntries(); } };
+$("rvNext").onclick = () => { rvPage++; loadEntries(); };
+$("rvSave").onclick = async () => {
+  try{
+    await api("/api/review", {src: rvEditingSrc, dst: $("rvDstBox").value});
+    closeModal("rvModal"); toast("已保存");
+    loadEntries();
+  }catch(e){ toast("保存失败："+e.message); }
+};
+
+/* ================= 设置 ================= */
+function fillSettings(){
+  if(!S) return;
+  const a = S.config.api, p = S.config.pipeline, t = S.config.translation||{};
+  $("setBase").value = a.base_url||""; $("setKey").value = a.api_key||"";
+  $("setModel").value = a.model||""; $("setTemp").value = a.temperature??0.2;
+  $("setMaxTok").value = a.max_tokens??8192; $("setTimeout").value = a.timeout??180;
+  $("setThinking").checked = a.thinking===false ? true : !a.thinking ? true : false;
+  $("setThinking").checked = (a.thinking===false);
+  $("setConc").value = p.concurrency??6; $("setBatch").value = p.batch_size??12;
+  $("setRetries").value = p.max_retries??4; $("setSample").value = p.sample_size??120;
+  $("setOutDir").value = p.output_dir||"output";
+  $("setCtx").value = t.context_window??3;
+  $("setR18").value = t.r18_style||"explicit"; $("setNameStyle").value = t.name_style||"auto";
+  $("setPolishThr").value = t.polish_threshold??80;
+  $("setCustomPrompt").value = t.custom_prompt||"";
+}
+$("btnSaveSettings").onclick = async () => {
+  try{
+    await api("/api/config", {
+      api:{
+        base_url:$("setBase").value.trim(), api_key:$("setKey").value.trim(),
+        model:$("setModel").value.trim(), temperature:+$("setTemp").value||0.2,
+        max_tokens:+$("setMaxTok").value||8192, timeout:+$("setTimeout").value||180,
+        thinking: !$("setThinking").checked ? true : false,
+      },
+      pipeline:{
+        concurrency:+$("setConc").value||6, batch_size:+$("setBatch").value||12,
+        max_retries:+$("setRetries").value||4, sample_size:+$("setSample").value||120,
+        output_dir:$("setOutDir").value.trim()||"output",
+      },
+      translation:{
+        r18_style:$("setR18").value, name_style:$("setNameStyle").value,
+        context_window:+$("setCtx").value||0, custom_prompt:$("setCustomPrompt").value,
+        polish_threshold:+$("setPolishThr").value||80,
+      },
+    });
+    toast("设置已保存");
+    settingsFilled = false; S = await api("/api/state"); renderState(); settingsFilled = true;
+  }catch(e){ toast("保存失败："+e.message); }
+};
+$("btnTestLLM").onclick = async () => {
+  $("testResult").textContent = "测试中…";
+  try{
+    // 先临时保存设置再测试，保证测的是当前表单值
+    await $("btnSaveSettings").onclick ? null : null;
+  }catch(e){}
+  try{
+    const j = await api("/api/test", {});
+    $("testResult").textContent = j.ok ? `✓ 连接成功（${j.latency}s）` : ("✗ "+j.error);
+  }catch(e){ $("testResult").textContent = "✗ "+e.message; }
+};
+
+/* ================= 启动轮询 ================= */
+pollState(); pollLogs();
+setInterval(pollState, 1500);
+setInterval(pollLogs, 1500);
+setTimeout(() => { if(S){ renderRecent(); } }, 600);
+</script>
+</body>
+</html>

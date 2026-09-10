@@ -1,0 +1,34 @@
+{
+  "api": {
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key": "",
+    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "thinking": false,
+    "temperature": 0.2,
+    "max_tokens": 8192,
+    "timeout": 180
+  },
+  "pipeline": {
+    "concurrency": 6,
+    "batch_size": 12,
+    "max_retries": 4,
+    "sample_size": 120,
+    "output_dir": "output"
+  },
+  "language": {
+    "source": "ja",
+    "target": "zh-CN",
+    "target_note": "简体中文，游戏本地化风格，自然口语化"
+  },
+  "translation": {
+    "r18_style": "explicit",
+    "name_style": "auto",
+    "context_window": 3,
+    "custom_prompt": "",
+    "polish": false,
+    "polish_threshold": 80
+  },
+  "webui": {
+    "recent_files": []
+  }
+}

@@ -1,0 +1,20 @@
+# 二进制资源：禁止 git 做行尾/编码转换
+*.ico binary
+*.png binary
+*.exe binary
+
+# Windows 脚本保持 CRLF（.bat 内容是 GBK 编码，只做行尾处理不动其余字节）
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 面向 Windows 记事本的文本
+*.txt text eol=crlf
+
+# 代码与文档统一 LF
+*.py text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.spec text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
