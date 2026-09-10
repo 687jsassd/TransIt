@@ -455,6 +455,10 @@ def task_export():
 # ---------------- HTTP Handler ----------------
 class Handler(BaseHTTPRequestHandler):
     server_version = "TransItWebUI/1.0"
+    # BaseHTTPRequestHandler 默认 HTTP/1.0（每请求一连接）。前端在持续轮询
+    # /api/state 与 /api/logs，用 1.1 的 keep-alive 可避免大量 TIME_WAIT 与重复握手。
+    # 前提是每条响应都带 Content-Length —— _json 与 _static 都设了，故安全。
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
         pass  # 静默访问日志（避免刷屏）

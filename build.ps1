@@ -41,11 +41,11 @@ function Fail($msg)        { Write-Host "  [FAIL] $msg" -ForegroundColor Red; ex
 
 <#
 .SYNOPSIS
-    用裸 socket 发一条 HTTP/1.1 请求，返回状态码。
-    比 Invoke-WebRequest 更贴近真实协议行为 —— 尤其是伪造 Host 头这种
-    受限头，.NET 的 HttpClient 会拒绝设置，测不出服务端行为。
+    用裸 socket 发一条 HTTP/1.1 请求，返回 @{ Code; Protocol; Body; BodyBytes }。
+    比 Invoke-WebRequest 更贴近真实协议行为 —— 尤其是伪造 Host 头这种受限头，
+    .NET 的 HttpClient 会拒绝设置，测不出服务端行为。
 #>
-function Invoke-RawHttp {
+function Get-RawHttp {
     param(
         [Parameter(Mandatory)][int]$Port,
         [Parameter(Mandatory)][string]$RequestText
@@ -57,13 +57,34 @@ function Invoke-RawHttp {
         $bytes = [System.Text.Encoding]::ASCII.GetBytes($RequestText)
         $stream.Write($bytes, 0, $bytes.Length)
         $stream.Flush()
-        $buf = New-Object byte[] 8192
-        $n = $stream.Read($buf, 0, $buf.Length)
-        $resp = [System.Text.Encoding]::UTF8.GetString($buf, 0, $n)
-        if ($resp -match '^HTTP/\d\.\d\s+(\d{3})') { return [int]$Matches[1] }
-        return 0
+        $ms = [System.IO.MemoryStream]::new()
+        $buf = New-Object byte[] 65536
+        while (($n = $stream.Read($buf, 0, $buf.Length)) -gt 0) { $ms.Write($buf, 0, $n) }
+        $text = [System.Text.Encoding]::UTF8.GetString($ms.ToArray())
+        $code = 0; $proto = ''
+        if ($text -match '^(HTTP/\d\.\d)\s+(\d{3})') { $proto = $Matches[1]; $code = [int]$Matches[2] }
+        $sep = $text.IndexOf("`r`n`r`n")
+        $body = if ($sep -ge 0) { $text.Substring($sep + 4) } else { '' }
+        return @{
+            Code      = $code
+            Protocol  = $proto
+            Body      = $body
+            BodyBytes = [System.Text.Encoding]::UTF8.GetByteCount($body)
+        }
     }
     finally { $client.Close() }
+}
+
+<#
+.SYNOPSIS
+    Get-RawHttp 的薄封装，只要状态码（用于断言 403/404 等）。
+#>
+function Invoke-RawHttp {
+    param(
+        [Parameter(Mandatory)][int]$Port,
+        [Parameter(Mandatory)][string]$RequestText
+    )
+    return (Get-RawHttp -Port $Port -RequestText $RequestText).Code
 }
 
 # ---------------------------------------------------------------- 前置校验
@@ -183,6 +204,21 @@ if (-not $SkipVerify) {
         }
         if (-not $up) { Fail 'WebUI 未能在 20 秒内启动' }
         Write-Ok 'WebUI 已监听，web/ 静态资源在冻结环境中可正常提供'
+
+        # 3a-2) 页面内容必须真的是完整 UI（只查状态码会漏掉"服务空页面"这种故障）
+        $page = Get-RawHttp -Port $port -RequestText (
+            "GET / HTTP/1.1`r`nHost: 127.0.0.1:$port`r`nConnection: close`r`n`r`n")
+        # 与磁盘上的原始字节数比较（不要 Trim：会把末尾换行算掉，导致差 1 字节）
+        $expectedBytes = (Get-Item 'web/index.html').Length
+        if ($page.BodyBytes -ne $expectedBytes) {
+            Fail "返回的 index.html 为 $($page.BodyBytes) 字节，期望 $expectedBytes 字节"
+        }
+        foreach ($needle in @('<title>TransIt', 'X-TransIt-Token', '工作台', '术语库', '译文修正')) {
+            if ($page.Body -notmatch [regex]::Escape($needle)) {
+                Fail "页面缺少关键内容：$needle"
+            }
+        }
+        Write-Ok "页面为完整 UI（$($page.BodyBytes) 字节，含前端与令牌逻辑，协议 $($page.Protocol)）"
 
         # 3a) 正确令牌 → 应放行
         $ok = Invoke-RawHttp -Port $port -RequestText (
