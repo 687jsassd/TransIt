@@ -112,6 +112,9 @@ if ($LASTEXITCODE -ne 0) { Fail 'config.example.json 校验未通过' }
 
 if (-not (Test-Path 'web/index.html')) { Fail '缺少 web/index.html' }
 if (-not (Test-Path 'packaging/使用说明.txt')) { Fail '缺少 packaging/使用说明.txt' }
+if (-not (Test-Path 'LICENSE')) { Fail '缺少 LICENSE（MIT 要求分发二进制时附带许可声明）' }
+& python 'tools/verify_sample.py'
+if ($LASTEXITCODE -ne 0) { Fail '示例样例校验未通过（分类分支覆盖有退化）' }
 
 # ---------------------------------------------------------------- 生成资产
 Write-Step '生成构建资产'
@@ -162,14 +165,15 @@ Write-Ok '发布物不含 config.json / output / uploads / 测试残留'
 Write-Step '放入用户文档'
 $utf8Bom = New-Object System.Text.UTF8Encoding $true
 foreach ($doc in @(@('packaging/使用说明.txt', '使用说明.txt'),
-                   @('config.example.json', 'config.example.json'))) {
-    # 加 BOM，保证记事本双击打开不乱码
+                   @('config.example.json', 'config.example.json'),
+                   @('LICENSE', 'LICENSE.txt'))) {
+    # 加 BOM，保证记事本双击打开不乱码（LICENSE 为纯 ASCII，加 BOM 无副作用）
     [System.IO.File]::WriteAllText(
         (Join-Path (Resolve-Path -LiteralPath $distDir).Path $doc[1]),
         (Get-Content -Raw -Encoding UTF8 $doc[0]),
         $utf8Bom)
 }
-Write-Ok '已放入 使用说明.txt + config.example.json'
+Write-Ok '已放入 使用说明.txt + config.example.json + LICENSE.txt'
 
 # ---------------------------------------------------------------- 冒烟测试
 if (-not $SkipVerify) {
