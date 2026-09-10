@@ -407,26 +407,31 @@ footer{
 const $ = id => document.getElementById(id);
 const esc = s => String(s??"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function toast(msg){ const t=$("toast"); t.textContent=msg; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2200); }
-/* 本地接口令牌：启动时随 URL 片段传来（#token=xxx）。存入 sessionStorage 后立刻
-   从地址栏抹掉，之后所有 /api/* 请求带 X-TransIt-Token 头。 */
-const API_TOKEN = (() => {
+/* 本地接口令牌（仅当服务端用 --token / TRANSIT_API_TOKEN 启用时才有意义；默认不启用）。
+   地址栏片段里带来时立刻记下并抹掉，之后所有 /api/* 请求带 X-TransIt-Token 头。
+   关键：必须同时监听 hashchange 与 pageshow —— 浏览器把旧标签页导航到带令牌的链接时
+   只做片段跳转，不会重新加载页面，只读一次的写法会让页面永远拿不到新令牌。 */
+let apiToken = "";
+function syncTokenFromUrl(){
   const m = location.hash.match(/[#&]token=([A-Za-z0-9_\-]+)/);
-  let t = m ? m[1] : (sessionStorage.getItem("transit_token") || "");
-  if (m) {
-    sessionStorage.setItem("transit_token", t);
-    history.replaceState(null, "", location.pathname + location.search);
-  }
-  return t;
-})();
+  if(!m) return;
+  apiToken = m[1];
+  try { sessionStorage.setItem("transit_token", apiToken); } catch(e){}
+  history.replaceState(null, "", location.pathname + location.search);
+}
+try { apiToken = sessionStorage.getItem("transit_token") || ""; } catch(e){}
+syncTokenFromUrl();
+addEventListener("hashchange", syncTokenFromUrl);
+addEventListener("pageshow", syncTokenFromUrl);
 async function api(path, body){
-  const headers = {"X-TransIt-Token": API_TOKEN};
+  const headers = {};
+  if(apiToken) headers["X-TransIt-Token"] = apiToken;
   if(body!==undefined) headers["Content-Type"] = "application/json";
   const opt = body!==undefined
     ? {method:"POST", headers, body:JSON.stringify(body)}
     : {headers};
   const r = await fetch(path, opt);
-  if(r.status===403) throw new Error("访问令牌无效或缺失：请关闭本页，用启动程序时自动打开的链接访问");
-  const j = await r.json().catch(()=>({error:"响应解析失败"}));
+  const j = await r.json().catch(()=>({error:"响应解析失败 (HTTP "+r.status+")"}));
   if(!r.ok || j.error) throw new Error(j.error || ("HTTP "+r.status));
   return j;
 }

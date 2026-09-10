@@ -34,8 +34,10 @@
 - ✅ **思考功能默认禁用**：翻译任务关闭模型 reasoning，速度大幅提升（可配置开启）
 - ✅ **超长文本单独小批**：防止上下文/输出截断
 - ✅ **省 token**：术语库按批次文本子串过滤，只注入本批相关词条
-- ✅ **本地接口带令牌**：WebUI 每次启动生成一次性访问令牌（URL 片段传递，不进日志/Referer），
-  所有 `/api/*` 校验令牌 + `Host` + `Origin`，其他网页无法偷偷调用你的本地服务
+- ✅ **本地接口自带防护**：WebUI 只监听 `127.0.0.1`，并对 `/api/*` 校验 `Host` 白名单
+  （挡 DNS 重绑定）与 `Origin` 白名单（挡 CSRF），响应带 `X-Frame-Options: DENY`
+  （挡点击劫持）—— 其他网页既发不出能通过校验的请求，也读不到响应。
+  默认**不需要**任何令牌，正常用浏览器访问即可；需要额外一层可选用 `--token`
 - ✅ **可打包为绿色便携版**：`build.ps1` 一键产出免安装 ZIP（详见「打包与发布」）
 
 ## 快速开始（推荐：WebUI）
@@ -157,11 +159,13 @@ python transit_cli.py {analyze|translate|run|export} <input.json> [选项]
 - **数据目录**：配置与输出固定在「数据目录」——源码运行时是项目根目录，
   打包后是 exe 所在目录；可用环境变量 `TRANSIT_DATA_DIR` 覆盖。
   `output_dir` 配成相对路径时锚定该目录，不受进程 CWD 影响
-- **本地接口令牌**：WebUI 启动时生成随机令牌，随 URL 片段（`#token=...`）交给浏览器，
-  页面读取后转为 `X-TransIt-Token` 请求头并抹掉地址栏片段。因此**必须用程序自动打开的
-  那个页面**访问，手动敲 `http://127.0.0.1:8765/` 会得到 403。
-  可用 `TRANSIT_API_TOKEN` 固定令牌（自用书签/自动化测试），
-  `--print-token` 会在控制台打印完整访问链接
+- **本地接口防护**：WebUI 只监听 `127.0.0.1`，`/api/*` 会校验 `Host` 与 `Origin` 必须是本机，
+  因此**必须用浏览器打开程序给出的地址**（`http://127.0.0.1:8765/`），
+  用 curl 等工具伪造 `Host` 会被 403。
+  默认不需要令牌；如需额外一层加固，启动前设 `TRANSIT_API_TOKEN=<自定义值>`，
+  此时必须用启动时自动打开的链接（携带 `#token=...`）访问
+- **重复启动是安全的**：如果已有本版本实例在运行，再次双击只会打开浏览器指向它，
+  不会起第二个服务。若检测到端口上跑着**旧版本**（或别的程序），会改用其他端口并提示你关闭它
 - **API Key 安全**：config.json 含明文 key，**请勿提交到公共仓库**（已在 `.gitignore` 中）；
   可用环境变量 `TRANSIT_API_KEY` / `TRANSIT_BASE_URL` / `TRANSIT_MODEL` 覆盖，避免落盘
 - **thinking 参数**：SiliconFlow/DeepSeek 系模型默认开启思考（reasoning），
@@ -265,7 +269,8 @@ onefile 会导致用户数据丢失。onedir 秒开，数据目录稳定可见�
 1. `config.example.json` 与 `transit/config.py` 的 `DEFAULT_CONFIG` 必须一致且不含密钥
 2. 发布物中不得出现 `config.json` / `output` / `uploads` / `_t_edge_profile` / `示例翻译文件`
 3. 冻结后**数据目录必须落在 exe 同目录**（验证 `transit/paths.py` 的冻结分支）
-4. WebUI 冒烟测试：静态页 200、带正确令牌 200、无令牌 403、跨站 `Origin` 403、伪造 `Host` 403
+4. WebUI 冒烟测试：静态页与完整 UI 字节数、默认无令牌放行、跨站 `Origin` 403、
+   伪造 `Host` 403、防点击劫持响应头；再以 `TRANSIT_API_TOKEN` 重启验证可选令牌路径
 
 **版本号单一来源**：改 `transit/__init__.py` 的 `__version__`，
 Windows 文件属性由 `tools/make_version_info.py` 自动生成。

@@ -33,6 +33,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
 from transit import paths
+from transit import __version__
 from transit.config import load_config, save_config, ensure_config_file
 from transit.llm import LLMClient, LLMError
 from transit.reader import load_mt_file, analyze_file, file_hash
@@ -48,7 +49,7 @@ WEB_DIR = paths.resource_path("web")
 UPLOAD_DIR = paths.data_path("uploads")
 RECENT_LIMIT = 8
 
-#: 本地接口访问令牌，main() 启动时填充（见 Handler._authorized）
+#: 可选的本地接口访问令牌（仅当设置 TRANSIT_API_TOKEN 时启用；默认 None = 不校验）
 API_TOKEN = {"value": None}
 
 
@@ -463,34 +464,57 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 静默访问日志（避免刷屏）
 
-    # ---------- 本地接口鉴权 ----------
+    # ---------- 本地接口防护 ----------
     # 只监听 127.0.0.1 并不足够：任意网页都能向 localhost 发「简单请求」
-    # （text/plain 的 POST 不触发 CORS 预检），从而盲写 /api/config、
-    # /api/translate，或调用 /api/browse 列目录。故要求 token + 校验 Host/Origin。
+    # （text/plain 的 POST 不触发 CORS 预检），从而盲写 /api/config、/api/translate，
+    # 或调用 /api/browse 列目录。真正管用的是下面两道，而且用户完全无感：
+    #
+    #   1) Host 白名单 —— 阻断 DNS 重绑定（攻击者域名解析到 127.0.0.1 后，
+    #      页面发出的请求 Host 仍是攻击者域名，浏览器无法伪造该头）
+    #   2) Origin 白名单 —— 阻断 CSRF（跨站 fetch / 表单提交都会带 Origin，
+    #      同样无法被页面 JS 伪造），配合响应头 X-Frame-Options 阻断点击劫持
+    #
+    # 经此两道，跨站页面既发不出通过校验的请求，也读不到响应（无 CORS 头）。
+    # 令牌（--token / TRANSIT_API_TOKEN）作为**可选**加固保留，默认关闭 ——
+    # 因为它对上述攻击没有额外价值，却会带来「链接一变就永久 403」的使用陷阱。
     def _local_hosts(self):
         port = self.server.server_address[1]
         return {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
 
-    def _authorized(self):
-        # 1) Host 校验：阻断 DNS 重绑定（攻击者域名解析到 127.0.0.1）
+    def _host_origin_reason(self):
+        """Host + Origin 校验（这两道不需要任何令牌，本地页面永远能过）。"""
         host = (self.headers.get("Host") or "").strip().lower()
         if host not in self._local_hosts():
-            return False
-        # 2) Origin 校验：带 Origin 且非本机来源 → 跨站请求，直接拒绝
+            return f"Host 不被允许：{host!r}（仅接受本机地址）"
         origin = self.headers.get("Origin")
         if origin and urlsplit(origin).hostname not in ("127.0.0.1", "localhost", "::1"):
-            return False
-        # 3) token 校验：请求头优先，其次 URL 查询串 / 片段（前端首次读取后转请求头）
+            return f"跨站来源被拒绝：{origin}"
+        return None
+
+    def _token_reason(self):
+        """可选的令牌校验（仅当用户显式启用时生效）。"""
         expected = API_TOKEN.get("value")
         if not expected:
-            return True
-        supplied = self.headers.get("X-TransIt-Token")
-        if not supplied:
-            supplied = (parse_qs(urlsplit(self.path).query).get("token") or [""])[0]
+            return None
+        supplied = (self.headers.get("X-TransIt-Token")
+                    or (parse_qs(urlsplit(self.path).query).get("token") or [""])[0])
         try:
-            return bool(supplied) and secrets.compare_digest(supplied, expected)
+            if supplied and secrets.compare_digest(supplied, expected):
+                return None
         except TypeError:  # 非 ASCII 输入
-            return False
+            pass
+        return ("已启用访问令牌（--token / TRANSIT_API_TOKEN），但请求未携带或不匹配。"
+                "请用程序启动时自动打开的链接访问；若浏览器复用了旧标签页，"
+                "请关闭该标签页后重新启动程序。")
+
+    def _deny_reason(self):
+        """返回拒绝原因；None 表示放行。原因会回给客户端，便于排错。"""
+        return self._host_origin_reason() or self._token_reason()
+
+    def _security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
 
     # ---------- 基础 ----------
     def _json(self, obj, code=200):
@@ -499,6 +523,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -533,6 +558,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self._security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -540,15 +566,27 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             route = urlsplit(self.path).path
-            # 静态页面不鉴权（本身不含数据）；令牌由页面脚本从 URL 读取后走请求头
+            # 静态页面不设防：它本身不含任何数据，且必须能被加载才能谈其它
             if route == "/" or route.startswith("/index"):
                 self._static("index.html")
                 return
             if not route.startswith("/api/"):
                 self._json({"error": "not found"}, 404)
                 return
-            if not self._authorized():
-                self._json({"error": "unauthorized: 请用启动时打印的完整链接打开"}, 403)
+            # 探活端点：只做 Host/Origin 校验，不要求令牌。
+            # 供启动时判断「端口上是不是本版本的 TransIt」——若指向旧版本实例，
+            # 它既没有这个端点又会因缺令牌而 403，于是会被正确判定为不可复用。
+            if route == "/api/ping":
+                reason = self._host_origin_reason()
+                if reason:
+                    self._json({"error": reason}, 403)
+                    return
+                self._json({"app": "TransIt", "version": __version__,
+                            "token_required": bool(API_TOKEN.get("value"))})
+                return
+            reason = self._deny_reason()
+            if reason:
+                self._json({"error": reason}, 403)
                 return
             if route.startswith("/api/state"):
                 self._json(state_payload())
@@ -573,8 +611,9 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- POST ----------
     def do_POST(self):
         try:
-            if not self._authorized():
-                self._json({"error": "unauthorized: 请用启动时打印的完整链接打开"}, 403)
+            reason = self._deny_reason()
+            if reason:
+                self._json({"error": reason}, 403)
                 return
             body = self._read_body()
             route = urlsplit(self.path).path
@@ -897,10 +936,48 @@ def _report_fatal(text: str) -> None:
         pass
 
 
+def _probe_existing_instance(port: int, timeout: float = 0.8):
+    """探测该端口上是否已有**本版本**的 TransIt WebUI 在跑。
+
+    返回 "ours" / "other" / None。用 /api/ping 而不是静态页做判据：静态页是从磁盘
+    读的，新旧版本内容可能一致；而 /api/ping 由服务端代码回答，旧版本实例没有这个
+    端点（或缺令牌会 403），因此能被正确识别为「不是可复用的实例」——避免把用户
+    引导到一个仍在要求令牌的旧服务上。
+    """
+    import urllib.error
+    import urllib.request
+    url = f"http://127.0.0.1:{port}/api/ping"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            info = json.loads(resp.read(2048).decode("utf-8"))
+    except urllib.error.HTTPError:
+        # 端口上确实有服务，但不是本版本的 TransIt（或需要令牌）
+        return "other"
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if info.get("app") == "TransIt" and info.get("version") == __version__:
+        return "ours"
+    return "other"
+
+
+def _open_browser(url: str) -> None:
+    """打开浏览器；失败时把地址告诉用户（窗口模式没有控制台，必须弹出来）。"""
+    def run():
+        try:
+            ok = webbrowser.open(url)
+        except Exception:
+            ok = False
+        if not ok:
+            STATE.log(f"未能自动打开浏览器，请手动访问：{url}", "warn")
+            _report_fatal(f"未能自动打开浏览器。\n\n请手动在浏览器中打开：\n{url}\n\n"
+                          f"（若浏览器已打开旧页面，请先关闭它再刷新）")
+
+    threading.Timer(0.6, run).start()
+
+
 def main(argv=None):
     port = 8765
     no_browser = False
-    print_token = False
     args = list(sys.argv[1:] if argv is None else argv)
     i = 0
     while i < len(args):
@@ -909,9 +986,6 @@ def main(argv=None):
             i += 2
         elif args[i] == "--no-browser":
             no_browser = True
-            i += 1
-        elif args[i] == "--print-token":
-            print_token = True
             i += 1
         else:
             i += 1
@@ -924,7 +998,7 @@ def main(argv=None):
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
     try:
-        return _serve(port, no_browser, print_token)
+        return _serve(port, no_browser)
     except SystemExit:
         raise
     except BaseException:
@@ -933,16 +1007,35 @@ def main(argv=None):
         raise
 
 
-def _serve(port: int, no_browser: bool, print_token: bool) -> int:
+def _serve(port: int, no_browser: bool) -> int:
+    # 已经有一个**本版本**实例在跑（用户重复双击）→ 直接复用，不再起第二个
+    stale_ports = []
+    for p in range(port, port + 10):
+        found = _probe_existing_instance(p)
+        if found == "ours":
+            url = f"http://127.0.0.1:{p}/"
+            print(f"[webui] 检测到已在运行的 TransIt 实例，复用端口 {p}：{url}")
+            if not no_browser:
+                _open_browser(url)
+            else:
+                print(f"[webui] 请访问 {url}")
+            return 0
+        if found == "other":
+            stale_ports.append(p)
+    if stale_ports:
+        msg = (f"端口 {', '.join(map(str, stale_ports))} 上已有别的程序或旧版本 TransIt 在运行，"
+               f"将改用其他端口。若那是旧版本，请先把它关闭，否则会同时存在两个服务。")
+        print(f"[webui] {msg}")
+
     # 首次运行（尤其是便携版）自动生成 config.json 与数据目录
     cfg_path, created = ensure_config_file(CONFIG_PATH)
     paths.ensure_data_dirs()
     if created:
         STATE.log(f"已生成默认配置：{cfg_path}（请到「设置」页填入 API Key）")
 
-    # 本地接口令牌：默认每次启动随机生成；可用 TRANSIT_API_TOKEN 固定（测试/自用书签）
-    API_TOKEN["value"] = (os.environ.get("TRANSIT_API_TOKEN")
-                          or secrets.token_urlsafe(24))
+    # 可选加固：默认不启用令牌（Host + Origin + X-Frame-Options 已足够，
+    # 且令牌会让「浏览器复用旧标签页」变成永久 403 的死局）
+    API_TOKEN["value"] = os.environ.get("TRANSIT_API_TOKEN") or None
 
     server = None
     for p in range(port, port + 10):
@@ -958,17 +1051,19 @@ def _serve(port: int, no_browser: bool, print_token: bool) -> int:
         _report_fatal(msg + "\n请关闭占用端口的程序，或用 --port 指定其他端口。")
         return 1
 
-    # 令牌放 URL 片段（#）：不会进服务端日志 / Referer；前端读取后转请求头并清掉片段
-    url = f"http://127.0.0.1:{port}/#token={API_TOKEN['value']}"
+    url = f"http://127.0.0.1:{port}/"
+    if API_TOKEN["value"]:
+        # 令牌走 URL 片段：不进服务端日志 / Referer
+        url += f"#token={API_TOKEN['value']}"
     STATE.log(f"TransIt WebUI 已启动：http://127.0.0.1:{port}/")
     STATE.log(f"数据目录：{paths.data_dir()}")
     STATE.log(f"配置文件：{CONFIG_PATH}{'（本次新建）' if created else ''}")
-    print(f"[webui] TransIt WebUI 运行中: http://127.0.0.1:{port}/  (Ctrl+C 退出)")
+    if API_TOKEN["value"]:
+        STATE.log("已启用访问令牌（TRANSIT_API_TOKEN）")
+    print(f"[webui] TransIt WebUI 运行中: {url}  (Ctrl+C 退出)")
     print(f"[webui] {paths.describe()}")
-    if print_token:
-        print(f"[webui] access url: {url}")
     if not no_browser:
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+        _open_browser(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

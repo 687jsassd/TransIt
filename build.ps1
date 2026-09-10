@@ -52,7 +52,10 @@ function Get-RawHttp {
     )
     $client = [System.Net.Sockets.TcpClient]::new()
     try {
-        $client.Connect('127.0.0.1', $Port)
+        # 服务尚未起来时 Connect 会抛（目标计算机积极拒绝）；这不是错误，
+        # 而是启动轮询期间的正常状态，返回 Code=0 交给调用方继续等。
+        try { $client.Connect('127.0.0.1', $Port) }
+        catch { return @{ Code = 0; Protocol = ''; Headers = ''; Body = ''; BodyBytes = 0 } }
         $stream = $client.GetStream()
         $bytes = [System.Text.Encoding]::ASCII.GetBytes($RequestText)
         $stream.Write($bytes, 0, $bytes.Length)
@@ -64,10 +67,12 @@ function Get-RawHttp {
         $code = 0; $proto = ''
         if ($text -match '^(HTTP/\d\.\d)\s+(\d{3})') { $proto = $Matches[1]; $code = [int]$Matches[2] }
         $sep = $text.IndexOf("`r`n`r`n")
+        $headers = if ($sep -ge 0) { $text.Substring(0, $sep) } else { $text }
         $body = if ($sep -ge 0) { $text.Substring($sep + 4) } else { '' }
         return @{
             Code      = $code
             Protocol  = $proto
+            Headers   = $headers
             Body      = $body
             BodyBytes = [System.Text.Encoding]::UTF8.GetByteCount($body)
         }
@@ -85,6 +90,19 @@ function Invoke-RawHttp {
         [Parameter(Mandatory)][string]$RequestText
     )
     return (Get-RawHttp -Port $Port -RequestText $RequestText).Code
+}
+
+<#
+.SYNOPSIS
+    向系统要一个当前空闲的 TCP 端口（先绑 0 再释放）。
+    用于冒烟测试，避免与用户机器上其它程序（或残留实例）撞端口。
+#>
+function Get-FreePort {
+    $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $l.Start()
+    $p = $l.LocalEndpoint.Port
+    $l.Stop()
+    return $p
 }
 
 # ---------------------------------------------------------------- 前置校验
@@ -193,13 +211,12 @@ if (-not $SkipVerify) {
     }
     Write-Ok '数据目录正确落在 exe 同目录（config.json 已生成）'
 
-    # 3) WebUI：起服务，验证静态资源与三层防线
-    $port = 8791
-    $env:TRANSIT_API_TOKEN = 'smoke-test-token'
+    # 3) WebUI：默认配置（不启用令牌）—— 这是用户最常见的路径，必须畅通
+    $port = Get-FreePort
+    Remove-Item Env:\TRANSIT_API_TOKEN -ErrorAction SilentlyContinue
     $proc = Start-Process -FilePath $exeWeb -ArgumentList @('--no-browser', '--port', "$port") `
                           -PassThru -WindowStyle Hidden
     try {
-        $base = "http://127.0.0.1:$port"
         $up = $false
         foreach ($i in 1..40) {
             Start-Sleep -Milliseconds 500
@@ -209,7 +226,7 @@ if (-not $SkipVerify) {
         if (-not $up) { Fail 'WebUI 未能在 20 秒内启动' }
         Write-Ok 'WebUI 已监听，web/ 静态资源在冻结环境中可正常提供'
 
-        # 3a-2) 页面内容必须真的是完整 UI（只查状态码会漏掉"服务空页面"这种故障）
+        # 3a) 页面内容必须真的是完整 UI（只查状态码会漏掉"服务空页面"这种故障）
         $page = Get-RawHttp -Port $port -RequestText (
             "GET / HTTP/1.1`r`nHost: 127.0.0.1:$port`r`nConnection: close`r`n`r`n")
         # 与磁盘上的原始字节数比较（不要 Trim：会把末尾换行算掉，导致差 1 字节）
@@ -222,44 +239,72 @@ if (-not $SkipVerify) {
                 Fail "页面缺少关键内容：$needle"
             }
         }
-        Write-Ok "页面为完整 UI（$($page.BodyBytes) 字节，含前端与令牌逻辑，协议 $($page.Protocol)）"
+        if ($page.Headers -notmatch 'X-Frame-Options: DENY') {
+            Fail '响应缺少 X-Frame-Options: DENY'
+        }
+        Write-Ok "页面为完整 UI（$($page.BodyBytes) 字节，协议 $($page.Protocol)，含防点击劫持头）"
 
-        # 3a) 正确令牌 → 应放行
-        $ok = Invoke-RawHttp -Port $port -RequestText (
-            "GET /api/state HTTP/1.1`r`nHost: 127.0.0.1:$port`r`n" +
-            "X-TransIt-Token: smoke-test-token`r`nConnection: close`r`n`r`n")
-        if ($ok -ne 200) { Fail "带正确令牌访问 /api/state 应 200，实际 $ok" }
-        Write-Ok '带正确令牌访问 /api/* 放行（200）'
-
-        # 3b) 无令牌 → 应拒绝
+        # 3b) 回归防线：默认不启用令牌时，不带令牌的普通请求必须畅通。
+        #     曾经的 bug 正是「令牌只在页面首次解析时读一次 + 立刻抹掉地址栏片段」，
+        #     导致书签/历史/标签页复用一律 403 死局。这条断言就是防止它复发。
         $noTok = Invoke-RawHttp -Port $port -RequestText (
             "GET /api/state HTTP/1.1`r`nHost: 127.0.0.1:$port`r`nConnection: close`r`n`r`n")
-        if ($noTok -ne 403) { Fail "无令牌访问 /api/state 应 403，实际 $noTok" }
-        Write-Ok '无令牌访问 /api/* 被拒绝（403）'
+        if ($noTok -ne 200) { Fail "默认配置下无令牌访问 /api/state 应 200，实际 $noTok（令牌死局复发）" }
+        Write-Ok '默认配置下无令牌访问 /api/* 畅通（200，书签/历史/标签页复用均可用）'
 
         # 3c) 跨站 Origin（CSRF）→ 应拒绝
         $evilOrigin = Invoke-RawHttp -Port $port -RequestText (
             "GET /api/state HTTP/1.1`r`nHost: 127.0.0.1:$port`r`n" +
-            "Origin: http://evil.example`r`nX-TransIt-Token: smoke-test-token`r`nConnection: close`r`n`r`n")
+            "Origin: http://evil.example`r`nConnection: close`r`n`r`n")
         if ($evilOrigin -ne 403) { Fail "跨站 Origin 应 403，实际 $evilOrigin" }
         Write-Ok '跨站 Origin 被拒绝（403，CSRF 防线生效）'
 
         # 3d) 伪造 Host（DNS 重绑定）→ 应拒绝
         $badHost = Invoke-RawHttp -Port $port -RequestText (
-            "GET /api/state HTTP/1.1`r`nHost: attacker.example`r`n" +
-            "X-TransIt-Token: smoke-test-token`r`nConnection: close`r`n`r`n")
+            "GET /api/state HTTP/1.1`r`nHost: attacker.example`r`nConnection: close`r`n`r`n")
         if ($badHost -ne 403) { Fail "伪造 Host 应 403，实际 $badHost" }
         Write-Ok '伪造 Host 被拒绝（403，DNS 重绑定防线生效）'
     }
     finally {
         if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
-        Remove-Item Env:\TRANSIT_API_TOKEN -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $probe -ErrorAction SilentlyContinue
         # 清掉测试期间产生的运行时数据，保证发布包干净
         Remove-Item -LiteralPath (Join-Path $distDir 'config.json') -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Join-Path $distDir 'output') -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Join-Path $distDir 'uploads') -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath (Join-Path $distDir 'transit-error.log') -ErrorAction SilentlyContinue
+    }
+
+    # 4) 可选加固：显式启用令牌后，令牌路径本身也要真的能工作
+    Write-Host '  -- 可选令牌加固 --'
+    $port2 = Get-FreePort
+    $env:TRANSIT_API_TOKEN = 'smoke-test-token'
+    $proc2 = Start-Process -FilePath $exeWeb -ArgumentList @('--no-browser', '--port', "$port2") `
+                           -PassThru -WindowStyle Hidden
+    try {
+        $up2 = $false
+        foreach ($i in 1..40) {
+            Start-Sleep -Milliseconds 500
+            if ((Invoke-RawHttp -Port $port2 -RequestText "GET / HTTP/1.1`r`nHost: 127.0.0.1:$port2`r`nConnection: close`r`n`r`n") -eq 200) { $up2 = $true; break }
+        }
+        if (-not $up2) { Fail '启用令牌后 WebUI 未能启动' }
+
+        $okTok = Invoke-RawHttp -Port $port2 -RequestText (
+            "GET /api/state HTTP/1.1`r`nHost: 127.0.0.1:$port2`r`n" +
+            "X-TransIt-Token: smoke-test-token`r`nConnection: close`r`n`r`n")
+        if ($okTok -ne 200) { Fail "启用令牌后，带正确令牌应 200，实际 $okTok" }
+
+        $badTok = Invoke-RawHttp -Port $port2 -RequestText (
+            "GET /api/state HTTP/1.1`r`nHost: 127.0.0.1:$port2`r`nConnection: close`r`n`r`n")
+        if ($badTok -ne 403) { Fail "启用令牌后，无令牌应 403，实际 $badTok" }
+        Write-Ok '可选令牌加固：正确令牌 200 / 无令牌 403（两者均生效）'
+    }
+    finally {
+        if ($proc2 -and -not $proc2.HasExited) { Stop-Process -Id $proc2.Id -Force }
+        Remove-Item Env:\TRANSIT_API_TOKEN -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $distDir 'config.json') -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $distDir 'output') -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $distDir 'uploads') -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
