@@ -128,6 +128,26 @@ if (Test-Path 'config.json') {
 & python 'tools/check_config_example.py'
 if ($LASTEXITCODE -ne 0) { Fail 'config.example.json 校验未通过' }
 
+# 编码回归防线：Windows 上 stdout 被重定向时会按系统 ANSI 代码页编码，英文系统是
+# cp1252 —— 编码不了中文，任何带中文的输出（含 --help）都会抛 UnicodeEncodeError
+# 把程序打崩。中文系统是 cp936 看不出来，所以这里强制 cp1252 跑一遍入口做保证。
+# 注意：冻结后的 exe 忽略 PYTHONIOENCODING（PyInstaller 会设 Py_IgnoreEnvironmentFlag），
+# 只能靠代码里 reconfigure，所以这里同时检查两个入口确实调用了该函数。
+$savedIo = $env:PYTHONIOENCODING
+$env:PYTHONIOENCODING = 'cp1252'
+& python 'transit_cli.py' --help 2>&1 | Out-Null
+$encCode = $LASTEXITCODE
+$env:PYTHONIOENCODING = $savedIo
+if ($encCode -ne 0) {
+    Fail "强制 cp1252 下 transit_cli.py --help 退出码 $encCode（中文输出编码崩了，检查 transit.enable_utf8_stdio）"
+}
+foreach ($entry in @('transit_cli.py', 'webui.py')) {
+    if (-not (Select-String -Path $entry -Pattern 'enable_utf8_stdio' -Quiet)) {
+        Fail "$entry 没有调用 enable_utf8_stdio()，非中文 Windows 上会崩"
+    }
+}
+Write-Ok 'cp1252 环境下中文输出正常（编码防线有效）'
+
 if (-not (Test-Path 'web/index.html')) { Fail '缺少 web/index.html' }
 if (-not (Test-Path 'packaging/使用说明.txt')) { Fail '缺少 packaging/使用说明.txt' }
 if (-not (Test-Path 'LICENSE')) { Fail '缺少 LICENSE（MIT 要求分发二进制时附带许可声明）' }

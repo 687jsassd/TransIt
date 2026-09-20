@@ -1038,6 +1038,10 @@ def _open_browser(url: str) -> None:
 
 
 def main(argv=None):
+    # 非中文 Windows 上 stdout 被重定向时默认用 cp1252，打印中文会崩
+    from transit import enable_utf8_stdio
+    enable_utf8_stdio()
+
     port = 8765
     no_browser = False
     args = list(sys.argv[1:] if argv is None else argv)

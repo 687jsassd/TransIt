@@ -213,6 +213,10 @@ def cmd_run(args, cfg, llm):
 
 
 def main(argv=None):
+    # 必须最先执行：非中文 Windows 上 stdout 被重定向时默认用 cp1252，打印中文会崩
+    from transit import enable_utf8_stdio
+    enable_utf8_stdio()
+
     parser = argparse.ArgumentParser(description="TransIt: Mtools 翻译文件 AI 精翻")
     parser.add_argument("cmd", choices=["analyze", "translate", "run", "export"])
     parser.add_argument("input", help="输入的 Mtools 翻译 JSON 文件")
