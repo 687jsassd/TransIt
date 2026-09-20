@@ -51,6 +51,60 @@ jobs:
           Get-ChildItem release | Format-Table Name, Length
           Get-Content release/SHA256SUMS.txt
 
+      - name: 从 CHANGELOG 提取本版说明
+        id: notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $ver = $tag.TrimStart('v')
+          $lines = Get-Content -Encoding UTF8 CHANGELOG.md
+          $hit = $lines | Select-String -Pattern "^##\s*\[$([regex]::Escape($ver))\]" | Select-Object -First 1
+          $text = ""
+          if ($hit) {
+            $body = @()
+            # 从标题的下一行开始收集（标题与 Release 名称重复，去掉）；
+            # 遇到下一个二级标题即本节结束
+            for ($i = $hit.LineNumber; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match '^##\s') { break }
+              $body += $lines[$i]
+            }
+            $text = ($body -join "`n").Trim()
+          }
+          if (-not $text) {
+            Write-Host "CHANGELOG.md 中没有 $ver 的小节，退回自动生成说明"
+            "has_section=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } else {
+            Write-Host "已提取 $ver 小节（$($text.Length) 字符）"
+            $header = @"
+          免安装便携版：解压到任意目录，双击 ``TransIt.exe`` 即可，无需安装 Python。
+
+          | 文件 | 说明 |
+          |------|------|
+          | ``TransIt-$ver-win64.zip`` | Windows 10 / 11（64 位）便携版 |
+          | ``SHA256SUMS.txt`` | 校验和 |
+
+          > exe 未做代码签名，首次运行会触发 SmartScreen「Windows 已保护你的电脑」，
+          > 点「更多信息 → 仍要运行」即可。
+
+          ---
+
+          "@
+            $footer = @"
+
+          ---
+
+          **升级**：替换 ``TransIt.exe``、``TransIt-CLI.exe`` 与 ``_internal/``，
+          保留同目录下的 ``config.json``（API 配置）、``output/``、``uploads/``。
+
+          完整变更见 [CHANGELOG.md](https://github.com/$env:GITHUB_REPOSITORY/blob/main/CHANGELOG.md)。
+          "@
+            $note = (($header -split "`n" | ForEach-Object { $_ -replace '^\s{10}', '' }) -join "`n")
+            $note = $note + "`n" + $text + "`n" + (($footer -split "`n" | ForEach-Object { $_ -replace '^\s{10}', '' }) -join "`n")
+            Set-Content -LiteralPath "release-notes.md" -Value $note -Encoding UTF8
+            "has_section=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+
       - name: 上传到 Release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -60,13 +114,21 @@ jobs:
           $repo = $env:GITHUB_REPOSITORY
           $tag  = $env:GITHUB_REF_NAME
           $ver  = (python -c "import sys;sys.path.insert(0,'.');from transit import __version__;print(__version__)").Trim()
+          $has = "${{ steps.notes.outputs.has_section }}" -eq "true"
 
           # 已有 Release（手工建的）就追加附件，没有就按标签创建
           gh release view $tag --repo $repo 2>$null | Out-Null
           if ($LASTEXITCODE -ne 0) {
             Write-Host "Release $tag 不存在，创建中…"
-            gh release create $tag --repo $repo --verify-tag --title "TransIt $tag" --generate-notes
+            if ($has) {
+              gh release create $tag --repo $repo --verify-tag --title "TransIt $tag" --notes-file release-notes.md
+            } else {
+              gh release create $tag --repo $repo --verify-tag --title "TransIt $tag" --generate-notes
+            }
             if ($LASTEXITCODE -ne 0) { Write-Error "创建 Release 失败"; exit 1 }
+          } elseif ($has) {
+            # 已存在则把说明刷新为 CHANGELOG 内容（避免手工建的 Release 说明过薄）
+            gh release edit $tag --repo $repo --notes-file release-notes.md
           }
 
           $zip = "release/TransIt-$ver-win64.zip"
