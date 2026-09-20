@@ -31,6 +31,7 @@
     "polish_threshold": 80
   },
   "webui": {
+    "exit_when_idle_seconds": 600,
     "recent_files": []
   }
 }

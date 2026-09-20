@@ -43,6 +43,11 @@ DEFAULT_CONFIG = {
         "polish": False,
         "polish_threshold": 80,
     },
+    "webui": {
+        # 关掉浏览器多少秒后自动退出（0 = 不自动退出，只能靠界面上的「退出程序」）
+        # 打包版没有控制台窗口，不自动退出的话用户只能用任务管理器结束进程
+        "exit_when_idle_seconds": 600,
+    },
 }
 
 

@@ -175,7 +175,18 @@ footer{
   <span class="badge hash" id="hdHash" style="display:none"></span>
   <div class="spacer"></div>
   <span class="kv" id="hdModel"></span>
+  <button class="btn sm danger" id="btnQuit" title="关闭后台程序（关掉本页并不会自动结束进程）">⏻ 退出程序</button>
 </header>
+
+<div id="offline" style="display:none">
+  <div class="card" style="border-color:var(--err)">
+    <h3 style="color:var(--err)">⚠ 与程序失去连接</h3>
+    <div class="hint" style="margin-top:0" id="offlineMsg"></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary sm" onclick="location.reload()">重试连接</button>
+    </div>
+  </div>
+</div>
 
 <main>
   <div class="tabs">
@@ -393,9 +404,34 @@ footer{
         <label class="f">并发数（SiliconFlow 实测 6 最优）<input type="number" id="setConc" min="1" max="32"></label>
         <label class="f">批大小（条/请求）<input type="number" id="setBatch" min="1" max="60"></label>
         <label class="f">最大重试<input type="number" id="setRetries" min="0" max="10"></label>
-        <label class="f">分析采样数<input type="number" id="setSample" min="30" max="1000"></label>
         <label class="f">输出目录<input type="text" id="setOutDir"></label>
         <label class="f">上下文行数（组合句子翻译，0=关）<input type="number" id="setCtx" min="0" max="10"></label>
+      </div>
+    </div>
+    <div class="card">
+      <h3>分析采样量</h3>
+      <div class="hint" style="margin-top:0">
+        采样量 = <b>待译条数 × 采样比例</b>，再限制在「下限 ~ 上限」之间
+        （待译条数本身不足下限时取全量）。分析按剧本顺序分段摘录、覆盖开头/中段/结尾，
+        所以后段才出场的角色也能被分析到。加大采样能提升术语与角色覆盖率，但会多花 token。
+      </div>
+      <div class="grid3">
+        <label class="f">采样比例（%）<input type="number" id="setSampleRatio" min="0" max="100" step="1"></label>
+        <label class="f">下限（条）<input type="number" id="setSampleMin" min="0" max="100000"></label>
+        <label class="f">上限（条）<input type="number" id="setSampleMax" min="0" max="100000"></label>
+      </div>
+      <div class="kv" id="samplePreview" style="margin-top:8px"></div>
+    </div>
+    <div class="card">
+      <h3>程序行为</h3>
+      <div class="hint" style="margin-top:0">
+        打包版是窗口模式（刻意不弹黑色控制台），关掉浏览器后进程仍会留在后台。
+        这里设定「多久没人连就自动退出」；设为 0 表示一直不退出，
+        这时请用界面右上角的「退出程序」按钮关闭。
+        <b>有任务在跑时不会自动退出。</b>
+      </div>
+      <div class="grid3">
+        <label class="f">无人连接时自动退出（秒，0=不退出）<input type="number" id="setIdleExit" min="0" max="86400"></label>
       </div>
     </div>
     <div class="card">
@@ -537,11 +573,29 @@ const STATUS_CN = {idle:"待命", running:"运行中", done:"已完成", stopped
 const STATUS_COLOR = {idle:"#8b93a7", running:"#38bdf8", done:"#34d399", stopped:"#fbbf24", error:"#f87171"};
 
 /* ================= 轮询 ================= */
+let pollFails = 0;
+function markOffline(msg){
+  const box = $("offline");
+  if(box.style.display !== "none") return;
+  $("offlineMsg").innerHTML = msg;
+  box.style.display = "";
+}
 async function pollState(){
   try{
     S = await api("/api/state");
+    pollFails = 0;
+    if($("offline").style.display !== "none"){ location.reload(); return; }
     renderState();
-  }catch(e){ /* 服务器重启中，忽略 */ }
+  }catch(e){
+    // 连续失败才判定为断开：单次失败可能只是页面在切换/程序正在退出
+    pollFails++;
+    if(pollFails >= 4){
+      markOffline(
+        "程序可能已经退出（关闭浏览器一段时间后会自动退出，点了「退出程序」也会立即退出）。"
+        + "<br>请重新双击 <b>TransIt.exe</b> 启动，然后回到本页点「重试连接」。"
+        + "<br><span style='color:var(--muted)'>已翻译的进度都保存在磁盘上，不会丢失。</span>");
+    }
+  }
 }
 async function pollLogs(){
   try{
@@ -562,10 +616,28 @@ async function pollLogs(){
   }catch(e){}
 }
 
+/* 退出程序：关闭后台服务进程（打包版没有控制台窗口，否则只能用任务管理器结束） */
+$("btnQuit").onclick = async () => {
+  if(!confirm("确定要退出 TransIt 吗？\n\n· 后台程序会立即关闭，本页面随后失效\n· 翻译进度已保存在磁盘上，不会丢失\n· 下次双击 TransIt.exe 即可继续（会自动跳过已完成条目）")) return;
+  try{
+    await api("/api/shutdown", {});
+    markOffline("TransIt 已退出。可以关闭本页了。<br>下次双击 <b>TransIt.exe</b> 重新启动。");
+    stopPolling();
+  }catch(e){
+    // 服务端可能已经关了，连接被重置属于预期
+    markOffline("TransIt 已退出。可以关闭本页了。<br>下次双击 <b>TransIt.exe</b> 重新启动。");
+    stopPolling();
+  }
+};
+let pollTimers = [];
+function stopPolling(){ pollTimers.forEach(t => clearInterval(t)); pollTimers = []; }
+
 /* ================= 渲染主状态 ================= */
 function renderState(){
   if(!S) return;
   const f = S.file, t = S.task;
+  // 设置页可见时刷新采样量预览（加载文件后待译条数会变）
+  if($("vSettings") && $("vSettings").classList.contains("active")) updateSamplePreview();
   // 顶栏
   $("hdTask").textContent = (t.status==="running"?"⏳ ":"")+STATUS_CN[t.status] + (t.status==="running" && t.type ? ` · ${TASK_CN[t.type]||t.type}` : "");
   $("hdModel").textContent = S.config.api.model || "";
@@ -1009,16 +1081,49 @@ $("rvHint").addEventListener("keydown", e => {
 });
 
 /* ================= 设置 ================= */
+/* 采样量预览：让用户直观看到「比例 + 上下限」在当前文件上等于多少条 */
+function updateSamplePreview(){
+  const el = $("samplePreview");
+  if(!el) return;
+  const ratio = Math.max(0, (+$("setSampleRatio").value||0)/100);
+  const lo = Math.max(0, +$("setSampleMin").value||0);
+  const hi = Math.max(0, +$("setSampleMax").value||0);
+  const clamp = (total) => {
+    if(total <= 0) return 0;
+    let n = Math.round(total*ratio);
+    if(lo > 0) n = Math.max(n, lo);
+    if(hi > 0) n = Math.min(n, hi);
+    return Math.max(1, Math.min(n, total));
+  };
+  const need = (S && S.file && S.file.loaded) ? (S.file.need||0) : 0;
+  if(need > 0){
+    el.innerHTML = `算下来：本文件待译 <b>${fmtNum(need)}</b> 条 → 分析采样 <b style="color:var(--accent2)">${fmtNum(clamp(need))}</b> 条`
+      + `（约 ${fmtNum(clamp(need))} 条 × 若干次请求的 token 成本）`;
+  } else {
+    el.innerHTML = `算下来：待译条数 × ${(ratio*100).toFixed(0)}%，限制在 ${lo}~${hi} 条之间`
+      + `<span style="color:var(--muted)">（加载文件后这里会显示本文件的实际采样量）</span>`;
+  }
+}
+["setSampleRatio","setSampleMin","setSampleMax"].forEach(id => {
+  const el = $(id); if(el) el.addEventListener("input", updateSamplePreview);
+});
 function fillSettings(){
   if(!S) return;
   const a = S.config.api, p = S.config.pipeline, t = S.config.translation||{};
+  const c = S.config||{};
   $("setBase").value = a.base_url||""; $("setKey").value = a.api_key||"";
   $("setModel").value = a.model||""; $("setTemp").value = a.temperature??0.2;
   $("setMaxTok").value = a.max_tokens??8192; $("setTimeout").value = a.timeout??180;
   $("setThinking").checked = a.thinking===false ? true : !a.thinking ? true : false;
   $("setThinking").checked = (a.thinking===false);
   $("setConc").value = p.concurrency??6; $("setBatch").value = p.batch_size??12;
-  $("setRetries").value = p.max_retries??4; $("setSample").value = p.sample_size??120;
+  // 采样比例在界面上按百分比显示（0.1 -> 10）
+  $("setSampleRatio").value = Math.round((p.sample_ratio??0.1)*100);
+  $("setSampleMin").value = p.sample_min??200;
+  $("setSampleMax").value = p.sample_max??1000;
+  $("setIdleExit").value = (c.webui && c.webui.exit_when_idle_seconds!=null)
+    ? c.webui.exit_when_idle_seconds : 600;
+  updateSamplePreview();
   $("setOutDir").value = p.output_dir||"output";
   $("setCtx").value = t.context_window??3;
   $("setR18").value = t.r18_style||"explicit"; $("setNameStyle").value = t.name_style||"auto";
@@ -1036,8 +1141,13 @@ $("btnSaveSettings").onclick = async () => {
       },
       pipeline:{
         concurrency:+$("setConc").value||6, batch_size:+$("setBatch").value||12,
-        max_retries:+$("setRetries").value||4, sample_size:+$("setSample").value||120,
+        max_retries:+$("setRetries").value||4,
+        sample_ratio: Math.max(0, (+$("setSampleRatio").value||0)/100),
+        sample_min:+$("setSampleMin").value||0, sample_max:+$("setSampleMax").value||0,
         output_dir:$("setOutDir").value.trim()||"output",
+      },
+      webui:{
+        exit_when_idle_seconds: Math.max(0, +$("setIdleExit").value||0),
       },
       translation:{
         r18_style:$("setR18").value, name_style:$("setNameStyle").value,
@@ -1063,8 +1173,8 @@ $("btnTestLLM").onclick = async () => {
 
 /* ================= 启动轮询 ================= */
 pollState(); pollLogs();
-setInterval(pollState, 1500);
-setInterval(pollLogs, 1500);
+pollTimers.push(setInterval(pollState, 1500));
+pollTimers.push(setInterval(pollLogs, 1500));
 setTimeout(() => { if(S){ renderRecent(); } }, 600);
 </script>
 </body>

@@ -52,6 +52,79 @@ RECENT_LIMIT = 8
 #: 可选的本地接口访问令牌（仅当设置 TRANSIT_API_TOKEN 时启用；默认 None = 不校验）
 API_TOKEN = {"value": None}
 
+#: 当前 HTTP 服务器实例（由 _serve 填充），供退出接口与看门狗使用
+SERVER = {"inst": None}
+
+
+#: 「无人连接时自动退出」默认秒数（0 = 不自动退出）
+DEFAULT_IDLE_EXIT_SECONDS = 600
+#: 界面上设置的最小值 —— 太小会让程序在用户还没打开页面时就退出
+MIN_IDLE_EXIT_SECONDS = 30
+
+
+def resolve_idle_timeout(cfg: dict, override=None) -> float:
+    """解析「无人连接时自动退出」的秒数。0 表示不自动退出。
+
+    override 来自命令行（--exit-when-idle），不受界面最小值限制，便于测试。
+    """
+    if override is not None:
+        try:
+            return max(0.0, float(override))
+        except (TypeError, ValueError):
+            pass
+    raw = (cfg.get("webui") or {}).get("exit_when_idle_seconds",
+                                      DEFAULT_IDLE_EXIT_SECONDS)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return float(DEFAULT_IDLE_EXIT_SECONDS)
+    if v <= 0:
+        return 0.0
+    return max(float(MIN_IDLE_EXIT_SECONDS), v)
+
+
+def request_shutdown(delay: float = 0.3) -> None:
+    """安排退出：先让当前响应写回浏览器，再关服务器。
+
+    BaseHTTPRequestHandler 的 shutdown() 必须在 serve_forever() 之外的线程调用，
+    而请求处理本身就跑在独立线程里，这里再起一个线程是为了确保响应已经 flush。
+    """
+    def run():
+        time.sleep(delay)
+        srv = SERVER.get("inst")
+        if srv is not None:
+            try:
+                srv.shutdown()
+            except Exception:
+                pass
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _idle_watchdog(timeout: float) -> None:
+    """无人连接时自动退出。
+
+    为什么需要：打包成 exe 后是窗口模式（刻意不要黑色控制台窗口），关掉浏览器后
+    进程仍在后台，用户就只能靠任务管理器结束它。这里以「浏览器最后一次请求」为
+    心跳——页面每 1.5 秒轮询一次，关掉标签页后心跳停止，超时即退出。
+    有任务在跑时不退出：翻译/分析可能还要跑很久，而且进度是持续落盘的，
+    贸然退出会让用户以为任务丢了。
+    """
+    while True:
+        time.sleep(5)
+        srv = SERVER.get("inst")
+        if srv is None:
+            return
+        with STATE.lock:
+            running = STATE.task.get("status") == "running"
+        if running:
+            continue
+        idle = time.time() - STATE.last_request
+        if idle >= timeout:
+            STATE.log(f"已 {int(idle)} 秒没有浏览器连接，自动退出"
+                      f"（不需要这个行为可在设置里把「无人连接时自动退出」设为 0）")
+            request_shutdown(0.0)
+            return
+
 
 # ---------------- 全局状态 ----------------
 class AppState:
@@ -76,6 +149,12 @@ class AppState:
         self.logs = deque(maxlen=800)
         self.log_seq = 0
         self.progress_samples = []  # (t, done) 用于 ETA/速度
+        # 最近一次收到浏览器请求的时间 —— 用于「无人连接时自动退出」
+        self.last_request = time.time()
+
+    def touch(self):
+        """标记「浏览器还活着」。每个 HTTP 请求都会调用。"""
+        self.last_request = time.time()
 
     # ---------- 日志 ----------
     def log(self, msg, level="info"):
@@ -524,6 +603,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- GET ----------
     def do_GET(self):
         try:
+            STATE.touch()   # 心跳：有请求就说明浏览器还在
             route = urlsplit(self.path).path
             # 静态页面不设防：它本身不含任何数据，且必须能被加载才能谈其它
             if route == "/" or route.startswith("/index"):
@@ -570,6 +650,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- POST ----------
     def do_POST(self):
         try:
+            STATE.touch()   # 心跳：有请求就说明浏览器还在
             reason = self._deny_reason()
             if reason:
                 self._json({"error": reason}, 403)
@@ -602,6 +683,11 @@ class Handler(BaseHTTPRequestHandler):
             elif route == "/api/stop":
                 STATE.request_stop()
                 self._json({"ok": True})
+            elif route == "/api/shutdown":
+                # 先回答再退出，避免浏览器看到连接被重置
+                self._json({"ok": True, "message": "TransIt 即将退出，可以关闭本页了"})
+                STATE.log("收到退出请求，正在关闭…")
+                request_shutdown()
             elif route == "/api/glossary":
                 self.api_save_glossary(body)
             elif route == "/api/review":
@@ -794,6 +880,17 @@ class Handler(BaseHTTPRequestHandler):
                             cfg["pipeline"][k] = min(max(r, 0.0), 1.0)
                         else:
                             cfg["pipeline"][k] = int(v or 1)
+            if "webui" in body and isinstance(body["webui"], dict):
+                w = cfg.setdefault("webui", {})
+                if "exit_when_idle_seconds" in body["webui"]:
+                    try:
+                        iv = float(body["webui"]["exit_when_idle_seconds"])
+                    except (TypeError, ValueError):
+                        iv = DEFAULT_IDLE_EXIT_SECONDS
+                    # 0 表示不自动退出；正数不得小于最小值，否则页面还没打开就退出了
+                    if iv > 0:
+                        iv = max(float(MIN_IDLE_EXIT_SECONDS), iv)
+                    w["exit_when_idle_seconds"] = iv
             if "translation" in body and isinstance(body["translation"], dict):
                 t = cfg.setdefault("translation", {})
                 for k in ("r18_style", "name_style", "context_window",
@@ -1044,6 +1141,7 @@ def main(argv=None):
 
     port = 8765
     no_browser = False
+    idle_override = None
     args = list(sys.argv[1:] if argv is None else argv)
     i = 0
     while i < len(args):
@@ -1053,6 +1151,10 @@ def main(argv=None):
         elif args[i] == "--no-browser":
             no_browser = True
             i += 1
+        elif args[i] == "--exit-when-idle" and i + 1 < len(args):
+            # 无人连接多少秒后自动退出；0 = 不自动退出
+            idle_override = float(args[i + 1])
+            i += 2
         else:
             i += 1
 
@@ -1064,7 +1166,7 @@ def main(argv=None):
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
     try:
-        return _serve(port, no_browser)
+        return _serve(port, no_browser, idle_override)
     except SystemExit:
         raise
     except BaseException:
@@ -1073,7 +1175,7 @@ def main(argv=None):
         raise
 
 
-def _serve(port: int, no_browser: bool) -> int:
+def _serve(port: int, no_browser: bool, idle_override=None) -> int:
     # 已经有一个**本版本**实例在跑（用户重复双击）→ 直接复用，不再起第二个
     stale_ports = []
     for p in range(port, port + 10):
@@ -1123,13 +1225,27 @@ def _serve(port: int, no_browser: bool) -> int:
     if API_TOKEN["value"]:
         # 令牌走 URL 片段：不进服务端日志 / Referer
         url += f"#token={API_TOKEN['value']}"
+
+    SERVER["inst"] = server
+    idle_timeout = resolve_idle_timeout(STATE.cfg, idle_override)
+    if idle_timeout > 0:
+        threading.Thread(target=_idle_watchdog, args=(idle_timeout,), daemon=True).start()
+
     STATE.log(f"TransIt WebUI 已启动：http://127.0.0.1:{port}/")
     STATE.log(f"数据目录：{paths.data_dir()}")
     STATE.log(f"配置文件：{CONFIG_PATH}{'（本次新建）' if created else ''}")
     if API_TOKEN["value"]:
         STATE.log("已启用访问令牌（TRANSIT_API_TOKEN）")
+    if idle_timeout > 0:
+        STATE.log(f"关掉浏览器 {int(idle_timeout // 60)} 分钟后将自动退出"
+                  f"（界面右上角「退出程序」可立即关闭；设置里可关闭此行为）")
+    else:
+        STATE.log("已关闭「无人连接时自动退出」，请用界面右上角「退出程序」关闭")
     print(f"[webui] TransIt WebUI 运行中: {url}  (Ctrl+C 退出)")
     print(f"[webui] {paths.describe()}")
+    if idle_timeout > 0:
+        print(f"[webui] 关掉浏览器 {int(idle_timeout // 60)} 分钟后自动退出；"
+              f"或点界面右上角「退出程序」")
     if not no_browser:
         _open_browser(url)
     try:
@@ -1137,6 +1253,8 @@ def _serve(port: int, no_browser: bool) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        STATE.log("TransIt 已退出")
+        SERVER["inst"] = None
         server.server_close()
     return 0
 
