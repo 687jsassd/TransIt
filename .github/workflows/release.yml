@@ -127,8 +127,10 @@ jobs:
             }
             if ($LASTEXITCODE -ne 0) { Write-Error "创建 Release 失败"; exit 1 }
           } elseif ($has) {
-            # 已存在则把说明刷新为 CHANGELOG 内容（避免手工建的 Release 说明过薄）
+            # 已存在则把说明刷新为 CHANGELOG 内容（避免手工建的 Release 说明过薄）。
+            # 说明只是门面，失败不该挡住附件上传，所以不中止任务。
             gh release edit $tag --repo $repo --notes-file release-notes.md
+            if ($LASTEXITCODE -ne 0) { Write-Warning "刷新 Release 说明失败，保留原说明" }
           }
 
           $zip = "release/TransIt-$ver-win64.zip"
