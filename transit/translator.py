@@ -89,11 +89,14 @@ def render_context_block(context_lines: list) -> str:
 
 
 def build_translate_prompt(batch: list, glossary: dict, cfg: dict, batch_no: int = 0,
-                           context_lines: list = None) -> list:
+                           context_lines: list = None,
+                           extra_instruction: str = None) -> list:
     """构造翻译用 messages：系统提示含世界观+术语库，用户消息含待译文本。
 
     context_lines: 邻行上下文（[(行号, 原文, 是否本批待译), ...]），
     提供原文行序上下文，缓解 mtool 按行截断导致的语义割裂。
+    extra_instruction: 本次调用的一次性附加要求（如单条重译时用户给的修改意见），
+    只影响这一批，不写入配置。
     """
     lang = cfg["language"]
     tcfg = cfg.get("translation", {})
@@ -103,6 +106,9 @@ def build_translate_prompt(batch: list, glossary: dict, cfg: dict, batch_no: int
     worldview = glossary.get("worldview", "")
     game_ctx = glossary.get("game_context", {})
     notes = glossary.get("translation_notes", "")
+    naming_policy = glossary.get("naming_policy", "")
+    register = glossary.get("register_guide", {}) or {}
+    characters = glossary.get("characters", []) or []
     terms = glossary.get("terms", {})
     target_note = lang.get("target_note", "简体中文，游戏本地化风格")
 
@@ -127,10 +133,43 @@ def build_translate_prompt(batch: list, glossary: dict, cfg: dict, batch_no: int
             ctx_parts.append(f"【设定】{game_ctx['setting']}")
         if game_ctx.get("story"):
             ctx_parts.append(f"【剧情】{game_ctx['story']}")
+        if game_ctx.get("tone"):
+            ctx_parts.append(f"【整体基调】{game_ctx['tone']}")
+        if game_ctx.get("player_perspective"):
+            ctx_parts.append(f"【玩家视角】{game_ctx['player_perspective']}")
         if game_ctx.get("style_notes"):
             ctx_parts.append(f"【风格】{game_ctx['style_notes']}")
+    if naming_policy:
+        ctx_parts.append(f"【命名方针】{naming_policy}")
+    reg_lines = []
+    for key, label in (("narration", "旁白/叙述"), ("dialogue", "角色对白"),
+                       ("ui", "菜单/系统提示"), ("adult", "成人场景")):
+        if register.get(key):
+            reg_lines.append(f"  · {label}：{register[key]}")
+    if reg_lines:
+        ctx_parts.append("【语气指南】\n" + "\n".join(reg_lines))
     if notes:
         ctx_parts.append(f"【翻译注意】{notes}")
+    # 角色表：对白翻译最关键的上下文（性别→他/她、自称、语气、称呼关系）
+    char_lines = []
+    for c in characters:
+        if not isinstance(c, dict) or not c.get("name"):
+            continue
+        pairs = [
+            ("gender", "性别"), ("role", "身份"), ("personality", "性格"),
+            ("speech_style", "语气"), ("first_person", "自称"),
+            ("called_by_others", "被称呼为"),
+        ]
+        detail = " | ".join(f"{label}: {c[k]}" for k, label in pairs if c.get(k))
+        head = f"{c['name']} = {c.get('reading') or c['name']}"
+        char_lines.append(f"- {head}" + (f" | {detail}" if detail else ""))
+        if c.get("notes"):
+            char_lines.append(f"    注意: {c['notes']}")
+    if char_lines:
+        ctx_parts.append(
+            "【角色表】（对白必须贴合各角色的性别、身份与语气；"
+            "中文第三人称按「性别」选他/她；自称与称呼方式要与表中一致）\n"
+            + "\n".join(char_lines))
     ctx_block = "\n".join(ctx_parts)
 
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(batch))
@@ -217,6 +256,8 @@ def build_translate_prompt(batch: list, glossary: dict, cfg: dict, batch_no: int
 11. 输出 ONLY 一个 JSON 对象，不要任何解释、注释或围栏。"""
     if custom_prompt:
         user += f"\n\n【用户附加要求】\n{custom_prompt}"
+    if extra_instruction and extra_instruction.strip():
+        user += f"\n\n【本次修改要求】\n{extra_instruction.strip()}"
 
     # 邻行上下文（组合句子翻译）
     if context_lines:
@@ -294,6 +335,16 @@ def _merge_translations(batch: list, result: dict, out: dict, warnings: list) ->
     return ok
 
 
+def pick_translation(result: dict, src: str) -> str:
+    """从模型返回结果里取出某一条的译文（复用容错匹配逻辑）。
+
+    供单条重译等场景使用：模型可能微改键（全角/半角/空白），直接 result[src] 会取不到。
+    """
+    out = {}
+    _merge_translations([src], result or {}, out, [])
+    return out.get(src, "")
+
+
 class Translator:
     def __init__(self, llm: LLMClient, cfg: dict):
         self.llm = llm
@@ -302,12 +353,15 @@ class Translator:
         self.lock = threading.Lock()
 
     def translate_batch(self, batch: list, glossary: dict, batch_no: int = 0,
-                        context_lines: list = None) -> dict:
+                        context_lines: list = None,
+                        extra_instruction: str = None) -> dict:
         """翻译一个批次，返回 {原文: 译文}。
 
         context_lines: 邻行上下文（组合句子翻译），None 则纯按行翻译。
+        extra_instruction: 本次调用的一次性附加要求（不写入配置）。
         """
-        messages = build_translate_prompt(batch, glossary, self.cfg, batch_no, context_lines)
+        messages = build_translate_prompt(batch, glossary, self.cfg, batch_no,
+                                          context_lines, extra_instruction)
         result = self.llm.chat_json(messages)
         if not isinstance(result, dict):
             raise LLMError(f"batch {batch_no}: result not an object")

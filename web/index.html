@@ -246,11 +246,76 @@ footer{
   <!-- ============ 术语库 ============ -->
   <section class="view" id="vGlossary">
     <div class="card">
-      <h3>世界观 / 翻译注意（注入每次翻译的上下文）</h3>
-      <textarea id="gvWorldview" rows="3" placeholder="世界观概述…"></textarea>
-      <div style="height:8px"></div>
-      <textarea id="gvNotes" rows="2" placeholder="翻译注意事项（语气、称呼、尺度处理…）"></textarea>
+      <h3>风格圣经（分析产物，会注入每次翻译的上下文）</h3>
+      <div class="hint" style="margin-top:0;margin-bottom:8px">
+        这是「分析世界观」三步产出的内容：世界观/风格 → 角色表 → 术语。下面是可编辑的文本字段，
+        角色表与命名方针的改动同样会保存并影响后续翻译。
+      </div>
+      <label class="f" style="margin-bottom:8px">世界观概述
+        <textarea id="gvWorldview" rows="3" placeholder="世界观概述…"></textarea>
+      </label>
+      <div class="grid2">
+        <label class="f">命名方针（音译/意译、用字偏好）
+          <textarea id="gvNaming" rows="2" placeholder="人名音译、组织名意译…"></textarea>
+        </label>
+        <label class="f">翻译注意（最容易译错的地方）
+          <textarea id="gvNotes" rows="2" placeholder="语气、称呼、尺度处理…"></textarea>
+        </label>
+      </div>
+      <div class="grid2" style="margin-top:8px">
+        <label class="f">语气指南 · 旁白/叙述
+          <input type="text" id="gvRegNarr">
+        </label>
+        <label class="f">语气指南 · 角色对白
+          <input type="text" id="gvRegDial">
+        </label>
+        <label class="f">语气指南 · 菜单/系统提示
+          <input type="text" id="gvRegUi">
+        </label>
+        <label class="f">语气指南 · 成人场景
+          <input type="text" id="gvRegAdult">
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:8px">
+        <span class="kv">游戏类型：<b id="gvGenre">—</b></span>
+        <span class="kv">基调：<b id="gvTone">—</b></span>
+        <span class="kv">视角：<b id="gvPersp">—</b></span>
+      </div>
     </div>
+
+    <div class="card" id="gvConflictCard" style="display:none">
+      <h3>⚠️ 译法分歧 <span class="badge" id="gvConflictCount">0</span></h3>
+      <div class="hint" style="margin-top:0">
+        不同术语块对同一原文给出了不同译法。系统保留了先出现的译法，
+        下面列出被忽略的候选——如果哪个更合适，请在术语表中手改。
+      </div>
+      <div class="tblwrap" style="max-height:220px">
+        <table>
+          <thead><tr><th style="width:110px">分类</th><th style="width:30%">原文</th><th>保留</th><th>被忽略</th><th style="width:60px">次数</th></tr></thead>
+          <tbody id="gvConflictBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>角色表 <span class="badge" id="gvCharCount">0</span></h3>
+      <div class="hint" style="margin-top:0">
+        决定中文第三人称用「他/她」、以及每个角色的语气、自称与称呼方式。
+        可直接编辑，保存后立即影响后续翻译。
+      </div>
+      <div class="tblwrap" style="max-height:360px">
+        <table>
+          <thead><tr>
+            <th style="width:14%">原文名</th><th style="width:13%">译名</th>
+            <th style="width:68px">性别</th><th style="width:12%">身份</th>
+            <th style="width:14%">语气</th><th style="width:10%">自称</th>
+            <th style="width:16%">被称呼为</th><th>性格/注意</th>
+          </tr></thead>
+          <tbody id="gvCharBody"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="card">
       <h3>术语词条 <span class="badge" id="gvCount">0</span></h3>
       <div class="row" style="margin-bottom:10px">
@@ -274,18 +339,22 @@ footer{
   <section class="view" id="vReview">
     <div class="card">
       <h3>译文逐句修正（双击译文列编辑，即时写回进度文件）</h3>
-      <div class="row" style="margin-bottom:10px">
-        <input type="text" id="rvSearch" placeholder="搜索原文或译文…" style="flex:1;max-width:360px">
+      <div class="row" style="margin-bottom:10px;flex-wrap:wrap">
+        <input type="text" id="rvSearch" placeholder="搜索原文或译文…" style="flex:1;max-width:320px">
         <button class="btn sm" id="btnRvSearch">查找</button>
         <label class="row" style="gap:6px;font-size:12px;color:var(--muted)">
           <input type="checkbox" id="rvUntrans" style="accent-color:var(--accent)"> 只看未翻译
         </label>
+        <label class="row" style="gap:6px;font-size:12px;color:var(--muted)">
+          <input type="checkbox" id="rvNoPass" checked style="accent-color:var(--accent)"> 排除「原样保留」
+        </label>
         <div class="spacer"></div>
         <span class="kv" id="rvTotal"></span>
       </div>
+      <div class="kv" id="rvStats" style="margin-bottom:8px;font-size:12px"></div>
       <div class="tblwrap">
         <table>
-          <thead><tr><th style="width:44%">原文</th><th>当前译文（双击编辑）</th></tr></thead>
+          <thead><tr><th style="width:72px">分类</th><th style="width:40%">原文</th><th>当前译文（双击编辑）</th></tr></thead>
           <tbody id="rvBody"></tbody>
         </table>
       </div>
@@ -389,11 +458,17 @@ footer{
     <label class="f" style="margin-bottom:10px">原文
       <textarea id="rvSrcBox" rows="3" readonly style="opacity:.75"></textarea>
     </label>
-    <label class="f" style="margin-bottom:14px">译文（修改后保存）
+    <label class="f" style="margin-bottom:10px">译文（修改后保存，Ctrl+Enter 保存）
       <textarea id="rvDstBox" rows="4"></textarea>
     </label>
-    <div class="row" style="justify-content:flex-end">
+    <label class="f" style="margin-bottom:14px">本次修改要求（可选，交给 AI 重译时附带）
+      <input type="text" id="rvHint" placeholder="如：太书面了，改口语化一点／这里要用「您」">
+    </label>
+    <div class="row" style="justify-content:flex-end;flex-wrap:wrap">
+      <span class="kv" id="rvIdx" style="margin-right:auto;font-size:12px"></span>
       <button class="btn sm" onclick="closeModal('rvModal')">取消</button>
+      <button class="btn sm" id="rvRetrans">🤖 AI 重译</button>
+      <button class="btn sm" id="rvSaveNext">保存并下一条</button>
       <button class="btn primary sm" id="rvSave">💾 保存</button>
     </div>
   </div>
@@ -659,12 +734,96 @@ $("btnExport").onclick = async () => {
 $("btnStop").onclick = async () => { await api("/api/stop", {}); toast("停止信号已发送…"); };
 
 /* ================= 术语库 ================= */
+const CHAR_FIELDS = [
+  ["name","原文名"], ["reading","译名"], ["gender","性别"], ["role","身份"],
+  ["speech_style","语气"], ["first_person","自称"],
+  ["called_by_others","被称呼为"], ["personality","性格"],
+];
+let gvChars = null;   // 角色表编辑缓存
 function renderGlossary(){
-  if(!S || !S.glossary.exists){ $("gvBody").innerHTML = `<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:30px">尚未加载术语库 —— 请先在工作台运行「分析世界观 · 建术语库」</td></tr>`; $("gvCount").textContent="0"; return; }
+  const body = $("gvBody");
+  if(!S || !S.glossary.exists){
+    body.innerHTML = `<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:30px">尚未加载术语库 —— 请先在工作台运行「分析世界观 · 建术语库」</td></tr>`;
+    $("gvCount").textContent="0";
+    $("gvCharBody").innerHTML = `<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:20px">（暂无角色表）</td></tr>`;
+    $("gvCharCount").textContent = "0";
+    $("gvConflictCard").style.display = "none";
+    return;
+  }
   if(!gvEditCache) gvEditCache = JSON.parse(JSON.stringify(S.glossary.terms||{}));
-  $("gvWorldview").value = S.glossary.worldview || "";
-  $("gvNotes").value = S.glossary.translation_notes || "";
+  const g = S.glossary;
+  $("gvWorldview").value = g.worldview || "";
+  $("gvNotes").value = g.translation_notes || "";
+  $("gvNaming").value = g.naming_policy || "";
+  const reg = g.register_guide || {};
+  $("gvRegNarr").value  = reg.narration || "";
+  $("gvRegDial").value  = reg.dialogue || "";
+  $("gvRegUi").value    = reg.ui || "";
+  $("gvRegAdult").value = reg.adult || "";
+  const gc = g.game_context || {};
+  $("gvGenre").textContent = gc.genre || "—";
+  $("gvTone").textContent  = gc.tone || "—";
+  $("gvPersp").textContent = gc.player_perspective || "—";
+
+  // 角色表（可编辑）
+  gvChars = JSON.parse(JSON.stringify(g.characters || []));
+  drawGvChars();
+  // 译法分歧
+  const conf = g.term_conflicts || [];
+  $("gvConflictCard").style.display = conf.length ? "" : "none";
+  $("gvConflictCount").textContent = conf.length;
+  const cb = $("gvConflictBody"); cb.innerHTML = "";
+  conf.forEach(c => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><span class="cat-tag">${esc(c.category||"")}</span></td>`
+      + `<td>${esc(c.source||"")}</td><td>${esc(c.kept||"")}</td>`
+      + `<td style="color:var(--warn)">${esc(c.dropped||"")}</td>`
+      + `<td>${esc(String(c.count||1))}</td>`;
+    cb.appendChild(tr);
+  });
   drawGvRows();
+}
+function drawGvChars(){
+  const body = $("gvCharBody"); body.innerHTML = "";
+  const list = gvChars || [];
+  $("gvCharCount").textContent = list.length;
+  if(!list.length){
+    body.innerHTML = `<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:20px">（暂无角色表 —— 重新运行分析可生成）</td></tr>`;
+    return;
+  }
+  list.forEach((c, i) => {
+    const tr = document.createElement("tr");
+    const cell = (f, ph) => {
+      const v = c[f] || "";
+      if(f === "gender"){
+        return `<td><select class="gv-cf" data-i="${i}" data-f="gender" style="width:100%">`
+          + ["男","女","未知"].map(o => `<option${o===v?" selected":""}>${o}</option>`).join("")
+          + `</select></td>`;
+      }
+      return `<td class="editable" data-i="${i}" data-f="${f}" title="双击编辑">${esc(v)||`<i style="color:var(--muted)">${ph||"…"}</i>`}</td>`;
+    };
+    tr.innerHTML = cell("name") + cell("reading") + cell("gender") + cell("role")
+      + cell("speech_style") + cell("first_person") + cell("called_by_others")
+      + `<td class="editable" data-i="${i}" data-f="personality" title="双击编辑">`
+      + (esc(c.personality || "") || `<i style="color:var(--muted)">…</i>`) + `</td>`;
+    body.appendChild(tr);
+  });
+  body.querySelectorAll("td.editable").forEach(td => td.ondblclick = () => editGvChar(td));
+}
+function editGvChar(td){
+  const i = +td.dataset.i, f = td.dataset.f;
+  if(!gvChars || !gvChars[i]) return;
+  const old = gvChars[i][f] || "";
+  td.contentEditable = "true"; td.focus();
+  const sel = window.getSelection(); sel.selectAllChildren(td);
+  const finish = () => {
+    td.contentEditable = "false";
+    const val = td.textContent.trim();
+    gvChars[i][f] = val;
+    drawGvChars();
+  };
+  td.onblur = finish;
+  td.onkeydown = e => { if(e.key==="Enter"){ e.preventDefault(); td.blur(); } };
 }
 function drawGvRows(){
   const q = ($("gvSearch").value||"").trim();
@@ -728,47 +887,126 @@ $("btnGvSave").onclick = async () => {
     const j = await api("/api/glossary", {glossary:{
       worldview: $("gvWorldview").value.trim(),
       translation_notes: $("gvNotes").value.trim(),
+      naming_policy: $("gvNaming").value.trim(),
+      register_guide: {
+        narration: $("gvRegNarr").value.trim(),
+        dialogue: $("gvRegDial").value.trim(),
+        ui: $("gvRegUi").value.trim(),
+        adult: $("gvRegAdult").value.trim(),
+      },
+      characters: gvChars || [],
       terms: gvEditCache||{},
     }});
-    toast(`术语库已保存：${j.terms_count} 词条`);
-    gvEditCache = null; S = await api("/api/state"); gvEditCache = JSON.parse(JSON.stringify(S.glossary.terms||{})); drawGvRows();
+    toast(`已保存：${j.terms_count} 词条` + (j.characters_count ? ` ｜ 角色 ${j.characters_count} 人` : ""));
+    gvEditCache = null; gvChars = null;
+    S = await api("/api/state");
+    gvEditCache = JSON.parse(JSON.stringify(S.glossary.terms||{}));
+    renderGlossary();
   }catch(e){ toast("保存失败："+e.message); }
 };
 
 /* ================= 译文修正 ================= */
+const RV_CAT = {
+  passthrough:  {label:"原样保留", tip:"ID/数字/代码/纯西文，本来就不需要翻译"},
+  pretranslated:{label:"已有译文", tip:"输入文件里已带译文，直接沿用"},
+  need:         {label:"待译",     tip:"需要 AI 翻译的文本"},
+};
+let rvRows = [];          // 当前页的行，供"保存并下一条"使用
+let rvCursor = -1;        // 当前正在编辑的行号
 async function loadEntries(){
   const q = ($("rvSearch").value||"").trim();
   const un = $("rvUntrans").checked ? 1 : 0;
+  const nopass = $("rvNoPass").checked ? 1 : 0;
   try{
-    const j = await api(`/api/entries?q=${encodeURIComponent(q)}&page=${rvPage}&page_size=100&untranslated=${un}`);
-    $("rvTotal").textContent = `共 ${fmtNum(j.total)} 条`;
+    const j = await api(`/api/entries?q=${encodeURIComponent(q)}&page=${rvPage}&page_size=100`
+      + `&untranslated=${un}&exclude_passthrough=${nopass}`);
+    const st = j.stats || {};
+    $("rvTotal").textContent = `当前筛选 ${fmtNum(j.total)} 条`;
+    $("rvStats").innerHTML = "全局统计："
+      + `<b style="color:var(--accent2)">待译 ${fmtNum(st.need||0)}</b>`
+      + `（其中未翻译 <b style="color:var(--warn)">${fmtNum(st.untranslated||0)}</b>）`
+      + ` ｜ 已有译文 ${fmtNum(st.pretranslated||0)}`
+      + ` ｜ 原样保留 ${fmtNum(st.passthrough||0)}`;
     $("rvPage").textContent = `第 ${j.page} / ${Math.max(1, Math.ceil(j.total/j.page_size))} 页`;
+    rvRows = j.rows || []; rvCursor = -1;
     const body = $("rvBody"); body.innerHTML = "";
-    if(!j.rows.length) body.innerHTML = `<tr><td colspan="2" style="color:var(--muted);text-align:center;padding:30px">无匹配条目</td></tr>`;
-    j.rows.forEach(r => {
+    if(!rvRows.length){
+      body.innerHTML = `<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:30px">无匹配条目</td></tr>`;
+      return;
+    }
+    rvRows.forEach((r, i) => {
+      const cat = RV_CAT[r.cat] || {label:r.cat, tip:""};
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${esc(r.src)}</td><td class="editable ${r.cur?"":"x"}" style="${r.cur?"":"color:var(--muted)"}">${esc(r.cur)||"<i>（未翻译，点击填写）</i>"}</td>`;
-      tr.querySelector("td.editable").ondblclick = () => {
-        rvEditingSrc = r.src;
-        $("rvSrcBox").value = r.src; $("rvDstBox").value = r.cur;
-        openModal("rvModal"); $("rvDstBox").focus();
-      };
+      const done = r.cat === "need" && r.cur;
+      tr.innerHTML = `<td><span class="cat-tag" title="${esc(cat.tip)}">${esc(cat.label)}</span></td>`
+        + `<td>${esc(r.src)}</td>`
+        + `<td class="editable ${done?"":"x"}" style="${done?"":"color:var(--muted)"}">`
+        + `${esc(r.cur) || (r.cat==="need" ? "<i>（未翻译，双击填写）</i>" : "<i>（无需翻译）</i>")}</td>`;
+      tr.querySelector("td.editable").ondblclick = () => openRvModal(i);
       body.appendChild(tr);
     });
   }catch(e){ toast("加载条目失败："+e.message); }
 }
+function openRvModal(i){
+  const r = rvRows[i];
+  if(!r) return;
+  rvCursor = i;
+  rvEditingSrc = r.src;
+  $("rvSrcBox").value = r.src;
+  $("rvDstBox").value = r.cur;
+  $("rvHint").value = "";
+  $("rvIdx").textContent = `第 ${i+1} / ${rvRows.length} 条`;
+  $("rvRetrans").disabled = (r.cat === "passthrough");
+  $("rvRetrans").title = (r.cat === "passthrough")
+    ? "「原样保留」条目无需翻译" : "让 AI 按上面的「本次修改要求」重新翻译这一条";
+  openModal("rvModal");
+  $("rvDstBox").focus();
+}
+async function saveRv(next){
+  try{
+    await api("/api/review", {src: rvEditingSrc, dst: $("rvDstBox").value});
+    if(rvCursor >= 0 && rvRows[rvCursor]) rvRows[rvCursor].cur = $("rvDstBox").value;
+    if(next) toast("已保存");
+    if(next && rvCursor >= 0 && rvCursor + 1 < rvRows.length){
+      openRvModal(rvCursor + 1);
+      return;
+    }
+    closeModal("rvModal");
+    toast(next ? "已保存（本页最后一条）" : "已保存");
+    loadEntries();
+  }catch(e){ toast("保存失败："+e.message); }
+}
+async function retransRv(){
+  if(rvCursor < 0) return;
+  const btn = $("rvRetrans");
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = "⏳ 重译中…";
+  try{
+    const j = await api("/api/retranslate", {
+      src: rvEditingSrc, current: $("rvDstBox").value, hint: $("rvHint").value,
+    });
+    $("rvDstBox").value = j.dst;
+    if(rvRows[rvCursor]) rvRows[rvCursor].cur = j.dst;
+    toast("重译完成，确认后可保存");
+  }catch(e){ toast("重译失败："+e.message); }
+  finally{ btn.disabled = false; btn.textContent = old; }
+}
 $("btnRvSearch").onclick = () => { rvPage=1; loadEntries(); };
 $("rvSearch").addEventListener("keydown", e => { if(e.key==="Enter"){ rvPage=1; loadEntries(); } });
 $("rvUntrans").onchange = () => { rvPage=1; loadEntries(); };
+$("rvNoPass").onchange = () => { rvPage=1; loadEntries(); };
 $("rvPrev").onclick = () => { if(rvPage>1){ rvPage--; loadEntries(); } };
 $("rvNext").onclick = () => { rvPage++; loadEntries(); };
-$("rvSave").onclick = async () => {
-  try{
-    await api("/api/review", {src: rvEditingSrc, dst: $("rvDstBox").value});
-    closeModal("rvModal"); toast("已保存");
-    loadEntries();
-  }catch(e){ toast("保存失败："+e.message); }
-};
+$("rvSave").onclick = () => saveRv(false);
+$("rvSaveNext").onclick = () => saveRv(true);
+$("rvRetrans").onclick = retransRv;
+$("rvDstBox").addEventListener("keydown", e => {
+  if(e.key === "Enter" && (e.ctrlKey || e.metaKey)){ e.preventDefault(); saveRv(true); }
+  if(e.key === "Enter" && e.altKey){ e.preventDefault(); retransRv(); }
+});
+$("rvHint").addEventListener("keydown", e => {
+  if(e.key === "Enter"){ e.preventDefault(); retransRv(); }
+});
 
 /* ================= 设置 ================= */
 function fillSettings(){

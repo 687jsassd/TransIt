@@ -31,7 +31,7 @@ from transit.llm import LLMClient
 from transit.reader import load_mt_file, analyze_file, file_hash
 from transit.analyzer import (
     sample_texts, run_analysis, normalize_glossary,
-    save_glossary, load_glossary, flatten_terms,
+    save_glossary, load_glossary, flatten_terms, resolve_sample_count,
 )
 from transit.translator import Translator
 from transit.writer import export_file
@@ -102,8 +102,11 @@ def cmd_analyze(args, cfg, llm):
     print(f"[read] 共 {len(data)} 条: 跳过 {len(groups['passthrough'])} | "
           f"已有译文 {len(groups['translated'])} | 待译 {len(need)}")
 
-    samples = sample_texts(need, cfg["pipeline"].get("sample_size", 120))
-    print(f"[analyze] 采样 {len(samples)} 条文本进行分析...")
+    n = resolve_sample_count(len(need), cfg)
+    samples = sample_texts(need, cfg)
+    print(f"[analyze] 采样 {len(samples)}/{len(need)} 条"
+          f"（比例 {cfg['pipeline'].get('sample_ratio')}, 上下限 "
+          f"{cfg['pipeline'].get('sample_min')}~{cfg['pipeline'].get('sample_max')}）")
     raw = run_analysis(llm, samples, cfg)
     glossary = normalize_glossary(raw)
 
@@ -111,10 +114,13 @@ def cmd_analyze(args, cfg, llm):
     save_glossary(glossary, paths["glossary"])
 
     n_terms = sum(len(v) for v in glossary["terms"].values())
-    print(f"[analyze] 完成: 术语库 {n_terms} 个词条 -> {paths['glossary']}")
+    print(f"[analyze] 完成: 术语库 {n_terms} 个词条 | 角色表 "
+          f"{len(glossary.get('characters') or [])} 人 -> {paths['glossary']}")
     print(f"[analyze] 世界观: {glossary['worldview'][:120]}...")
     for cat, mp in glossary["terms"].items():
         print(f"  - {cat}: {list(mp.items())[:6]}{'...' if len(mp) > 6 else ''}")
+    for c in (glossary.get("characters") or [])[:8]:
+        print(f"  * {c['name']} = {c['reading']}（{c.get('gender','?')}/{c.get('role','?')}）")
 
 
 def cmd_translate(args, cfg, llm):
@@ -181,17 +187,19 @@ def cmd_run(args, cfg, llm):
     paths = make_paths(cfg, input_path, args.out, args.glossary, file_hash(input_path))
 
     if not os.path.isfile(paths["glossary"]) or args.force_analyze:
-        print(f"[run] 第一步：分析世界观并建术语库")
-        samples = sample_texts(need, cfg["pipeline"].get("sample_size", 120))
+        samples = sample_texts(need, cfg)
+        print(f"[run] 第一步：分析世界观/角色/术语（采样 {len(samples)}/{len(need)} 条）")
         raw = run_analysis(llm, samples, cfg)
         glossary = normalize_glossary(raw)
         save_glossary(glossary, paths["glossary"])
         n_terms = sum(len(v) for v in glossary["terms"].values())
-        print(f"[run] 术语库 {n_terms} 词条 -> {paths['glossary']}")
+        print(f"[run] 术语库 {n_terms} 词条 | 角色表 "
+              f"{len(glossary.get('characters') or [])} 人 -> {paths['glossary']}")
     else:
         glossary = load_glossary(paths["glossary"])
         n_terms = sum(len(v) for v in glossary.get("terms", {}).values())
-        print(f"[run] 复用现有术语库: {n_terms} 词条")
+        print(f"[run] 复用现有术语库: {n_terms} 词条 | 角色表 "
+              f"{len(glossary.get('characters') or [])} 人")
 
     translator = Translator(llm, cfg)
     log_path = os.path.splitext(os.path.basename(input_path))[0] + ".translate.log"

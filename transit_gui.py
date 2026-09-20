@@ -113,7 +113,9 @@ class TransItGUI:
         pl_rows = [
             ("并发数", "concurrency"),
             ("批大小", "batch_size"),
-            ("采样数(分析)", "sample_size"),
+            ("采样比例", "sample_ratio"),
+            ("采样下限", "sample_min"),
+            ("采样上限", "sample_max"),
             ("最大重试", "max_retries"),
         ]
         for i, (label, key) in enumerate(pl_rows):
@@ -346,15 +348,16 @@ class TransItGUI:
     def _analyze_worker(self):
         try:
             need = self.groups["need_translate"]
-            n = self.cfg["pipeline"].get("sample_size", 120)
-            self._log(f"采样 {n} 条文本，分阶段分析（世界观 1 次 + 术语分块若干次）...")
-            samples = sample_texts(need, n)
+            samples = sample_texts(need, self.cfg)
+            self._log(f"采样 {len(samples)}/{len(need)} 条文本，"
+                      f"分三阶段分析（世界观 → 角色表 → 术语提取）...")
             raw = run_analysis(self.llm, samples, self.cfg)
             self.glossary = normalize_glossary(raw)
             self._save_glossary_auto()
             self._refresh_glossary_tree()
             n_terms = sum(len(v) for v in self.glossary["terms"].values())
-            self._log(f"分析完成：术语库 {n_terms} 词条")
+            self._log(f"分析完成：术语库 {n_terms} 词条 | 角色表 "
+                      f"{len(self.glossary.get('characters') or [])} 人")
             self._log(f"世界观: {self.glossary.get('worldview', '')[:150]}")
             self._set_status(f"分析完成：{n_terms} 词条")
         except Exception as e:

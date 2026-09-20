@@ -39,9 +39,9 @@ from transit.llm import LLMClient, LLMError
 from transit.reader import load_mt_file, analyze_file, file_hash
 from transit.analyzer import (
     sample_texts, run_analysis, normalize_glossary,
-    save_glossary, load_glossary, TaskStopped,
+    save_glossary, load_glossary, TaskStopped, analysis_requests,
 )
-from transit.translator import Translator
+from transit.translator import Translator, build_contextual_batches, pick_translation
 from transit.writer import export_file
 
 CONFIG_PATH = paths.default_config_path()
@@ -211,6 +211,11 @@ def glossary_payload(st: AppState):
         "worldview": g.get("worldview", ""),
         "translation_notes": g.get("translation_notes", ""),
         "game_context": g.get("game_context", {}),
+        # 风格圣经的新字段：让用户能看到分析到底产出了什么（并可编辑回存）
+        "naming_policy": g.get("naming_policy", ""),
+        "register_guide": g.get("register_guide", {}) or {},
+        "characters": g.get("characters", []) or [],
+        "term_conflicts": g.get("term_conflicts", []) or [],
         "terms": terms,
         "categories": list(terms.keys()),
         "terms_count": sum(len(v) for v in terms.values() if isinstance(v, dict)),
@@ -266,19 +271,23 @@ def task_analyze():
     if not st.data:
         raise RuntimeError("请先加载输入文件")
     need = st.groups["need_translate"]
-    n = st.cfg["pipeline"].get("sample_size", 120)
     llm = _make_llm(st)
-    st.log(f"采样 {n} 条文本，分阶段分析（世界观 1 次 + 术语分块）...")
-    samples = sample_texts(need, n)
-    st.update_progress(0, 1 + (len(samples) + 59) // 60, 0)
+    p = st.cfg["pipeline"]
+    samples = sample_texts(need, st.cfg)
+    total_steps = analysis_requests(len(samples))
+    st.log(f"采样 {len(samples)}/{len(need)} 条"
+           f"（待译条数的 {float(p.get('sample_ratio', 0.1)) * 100:.0f}%，"
+           f"限制在 {p.get('sample_min')}~{p.get('sample_max')} 条）")
+    st.log(f"分三阶段分析：世界观与风格 → 角色表 → 术语提取（共约 {total_steps} 次请求）")
+    st.update_progress(0, total_steps, 0)
     done_steps = [0]
 
     def step_cb():
         done_steps[0] += 1
-        st.update_progress(done_steps[0], 1 + (len(samples) + 59) // 60, 0)
+        st.update_progress(done_steps[0], total_steps, 0)
 
-    raw = run_analysis_with_cb(llm, samples, st.cfg, step_cb,
-                               stop_check=st.stop_event.is_set)
+    raw = run_analysis(llm, samples, st.cfg, stop_check=st.stop_event.is_set,
+                       step_cb=step_cb)
     glossary = normalize_glossary(raw)
     paths = st.paths
     save_glossary(glossary, paths["glossary"])
@@ -286,64 +295,14 @@ def task_analyze():
         st.glossary = glossary
         st.glossary_path = paths["glossary"]
     n_terms = sum(len(v) for v in glossary["terms"].values())
-    st.log(f"分析完成：术语库 {n_terms} 词条 -> {paths['glossary']}")
+    n_chars = len(glossary.get("characters") or [])
+    st.log(f"分析完成：术语库 {n_terms} 词条 | 角色表 {n_chars} 人 -> {paths['glossary']}")
     st.log(f"世界观: {glossary.get('worldview', '')[:160]}")
-    st.update_progress(1, 1, 0)
-
-
-def run_analysis_with_cb(llm, samples, cfg, step_cb, stop_check=None):
-    """带阶段回调的分析（复用 analyzer 的分阶段逻辑，进度 +1/阶段）。"""
-    from transit import analyzer
-    lang = cfg["language"]
-    max_retries = cfg["pipeline"].get("max_retries", 4)
-
-    def check_stop():
-        if stop_check is not None and stop_check():
-            raise TaskStopped("用户停止了任务")
-
-    # 阶段 1：世界观
-    worldview = None
-    for attempt in range(max_retries):
-        check_stop()
-        try:
-            worldview = analyzer._request_worldview(llm, samples[:60], lang)
-            step_cb()
-            break
-        except LLMError as e:
-            if attempt == max_retries - 1:
-                raise
-            st_log(f"世界观分析失败，重试 {attempt + 1}: {e}")
-
-    # 阶段 2：术语分块
-    chunk_size = 60
-    chunks = [samples[i:i + chunk_size] for i in range(0, len(samples), chunk_size)]
-    merged = {}
-    for ci, chunk in enumerate(chunks):
-        check_stop()
-        chunk_terms = None
-        for attempt in range(max_retries):
-            check_stop()
-            try:
-                chunk_terms = analyzer._request_terms(llm, chunk, lang, ci + 1, len(chunks))
-                break
-            except LLMError as e:
-                if attempt == max_retries - 1:
-                    raise
-                st_log(f"术语块 {ci + 1} 失败，重试 {attempt + 1}: {e}")
-        for cat, mapping in (chunk_terms or {}).items():
-            if not isinstance(mapping, dict):
-                continue
-            merged.setdefault(cat, {})
-            for src, dst in mapping.items():
-                if isinstance(src, str) and isinstance(dst, str) and src.strip():
-                    merged[cat][src.strip()] = dst.strip()
-        step_cb()
-    return {
-        "worldview": (worldview or {}).get("worldview", ""),
-        "game_context": (worldview or {}).get("game_context", {}),
-        "terms": merged,
-        "translation_notes": (worldview or {}).get("translation_notes", ""),
-    }
+    conflicts = glossary.get("term_conflicts") or []
+    if conflicts:
+        st.log(f"发现 {len(conflicts)} 处译法分歧（已保留先出现的译法，"
+               f"可在「术语库」页核对）", "warn")
+    st.update_progress(total_steps, total_steps, 0)
 
 
 def st_log(msg, level="info"):
@@ -647,6 +606,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_save_glossary(body)
             elif route == "/api/review":
                 self.api_review_edit(body)
+            elif route == "/api/retranslate":
+                self.api_retranslate(body)
             elif route == "/api/test":
                 self.api_test_llm()
             else:
@@ -817,11 +778,20 @@ class Handler(BaseHTTPRequestHandler):
                         cfg["api"][k] = v
             if "pipeline" in body and isinstance(body["pipeline"], dict):
                 for k in ("concurrency", "batch_size", "max_retries",
-                          "sample_size", "output_dir"):
+                          "sample_ratio", "sample_min", "sample_max", "output_dir"):
                     if k in body["pipeline"]:
                         v = body["pipeline"][k]
                         if k == "output_dir":
                             cfg["pipeline"][k] = str(v or "output")
+                        elif k == "sample_ratio":
+                            # 比例用小数（0.1 = 10%），容错处理百分数写法
+                            try:
+                                r = float(v)
+                            except (TypeError, ValueError):
+                                r = 0.1
+                            if r > 1:
+                                r = r / 100.0
+                            cfg["pipeline"][k] = min(max(r, 0.0), 1.0)
                         else:
                             cfg["pipeline"][k] = int(v or 1)
             if "translation" in body and isinstance(body["translation"], dict):
@@ -847,20 +817,26 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "glossary 格式错误"}, 400)
             return
         st = STATE
-        norm = normalize_glossary(g)
         with st.lock:
-            # 保留不在表单里的字段
-            if st.glossary:
-                for k, v in st.glossary.items():
-                    norm.setdefault(k, v)
+            old = st.glossary or {}
+        # 以「客户端实际提交的字段」为准做合并：未提交的字段沿用原值。
+        # 不能先 normalize 再 setdefault —— normalize 会给缺失字段填默认空值
+        # （characters=[]、register_guide={}），setdefault 就再也救不回来了。
+        merged = dict(old)
+        merged.update({k: v for k, v in g.items() if v is not None})
+        norm = normalize_glossary(merged)
+        with st.lock:
             st.glossary = norm
             path = st.paths["glossary"] if st.paths else paths.data_path(
                 "output", "glossary.manual.json")
             save_glossary(norm, path)
             st.glossary_path = path
-        st.log(f"术语库已保存：{sum(len(v) for v in norm['terms'].values())} 词条")
+        n_chars = len(norm.get("characters") or [])
+        st.log(f"术语库已保存：{sum(len(v) for v in norm['terms'].values())} 词条"
+               + (f" | 角色表 {n_chars} 人" if n_chars else ""))
         self._json({"ok": True, "terms_count": sum(
-            len(v) for v in norm["terms"].values() if isinstance(v, dict))})
+            len(v) for v in norm["terms"].values() if isinstance(v, dict)),
+            "characters_count": n_chars})
 
     def api_review_edit(self, body):
         src = body.get("src")
@@ -884,23 +860,109 @@ class Handler(BaseHTTPRequestHandler):
         page = max(1, int(q.get("page", ["1"])[0] or 1))
         page_size = min(500, max(10, int(q.get("page_size", ["100"])[0] or 100)))
         only_untranslated = q.get("untranslated", ["0"])[0] == "1"
+        # 排除「原样保留」条目（ID/数字/代码/纯西文，本来就不需要翻译）
+        exclude_passthrough = q.get("exclude_passthrough", ["0"])[0] == "1"
+        cat_filter = (q.get("cat", [""])[0] or "").strip()
+
         with st.lock:
             translations = dict(st.translations)
-        rows = []
-        with st.lock:
             data = st.data
+            groups = st.groups
+        passthrough = set(groups["passthrough"]) if groups else set()
+        pretranslated = set(groups["translated"]) if groups else set()
+
+        rows = []
+        stats = {"passthrough": 0, "pretranslated": 0, "need": 0, "untranslated": 0}
         if data:
             for k, v in data.items():
-                if query and query not in k and query not in str(v):
+                if k in passthrough:
+                    cat = "passthrough"
+                elif k in pretranslated:
+                    cat = "pretranslated"
+                else:
+                    cat = "need"
+                cur = translations.get(k, "")
+                stats[cat] += 1
+                untranslated = (cat == "need" and not cur)
+                if untranslated:
+                    stats["untranslated"] += 1
+
+                # 搜索要同时覆盖原文与**当前译文**——原来只比对了原始文件的值，
+                # 导致按中文译文搜索永远搜不到
+                if query and query not in k and query not in str(cur) and query not in str(v):
                     continue
-                if only_untranslated and (k in translations and translations[k] != v):
+                if exclude_passthrough and cat == "passthrough":
                     continue
-                rows.append({"src": k, "cur": translations.get(k, "")})
+                if cat_filter and cat != cat_filter:
+                    continue
+                # 「只看未翻译」只对「待译」类有意义：原样保留条目永远不会有译文，
+                # 若把它们算作未翻译，这个筛选就永远被噪声淹没
+                if only_untranslated and not untranslated:
+                    continue
+                rows.append({"src": k, "cur": cur, "cat": cat,
+                             "orig": str(v) if v != k else ""})
+
         total = len(rows)
         start = (page - 1) * page_size
-        return {"total": total, "page": page,
-                "page_size": page_size,
+        return {"total": total, "page": page, "page_size": page_size,
+                "stats": stats,
                 "rows": rows[start:start + page_size]}
+
+    def api_retranslate(self, body):
+        """单条重译：只对指定条目请求一次翻译，可附带本次修改要求。
+
+        比"整轮重跑"实用得多——发现某句译得不好时，不必重译上千条。
+        """
+        src = (body.get("src") or "").strip()
+        if not src:
+            self._json({"error": "缺少 src"}, 400)
+            return
+        st = STATE
+        with st.lock:
+            if not st.data:
+                self._json({"error": "未加载文件"}, 400)
+                return
+            if src not in st.data:
+                self._json({"error": "该条目不在当前文件中"}, 400)
+                return
+            if not st.glossary:
+                self._json({"error": "没有术语库，请先运行分析"}, 400)
+                return
+            all_keys = list(st.data.keys())
+            glossary = st.glossary
+            cfg = st.cfg
+        hint = str(body.get("hint") or "")[:1500]
+        current = str(body.get("current") or "")
+
+        try:
+            llm = _make_llm(st)
+            tr = Translator(llm, cfg)
+            window = int(cfg.get("translation", {}).get("context_window", 3) or 0)
+            batches = build_contextual_batches([src], all_keys, 1, window) if window > 0 \
+                else [([src], None)]
+            _, context = batches[0]
+            # 已有译文时把它作为"要改进的旧译"告诉模型
+            instruction = ""
+            if current.strip():
+                instruction += f"上一版译文是：「{current}」，请给出更好的版本。"
+            if hint.strip():
+                instruction += f"\n本次修改要求：{hint}"
+            result = tr.translate_batch([src], glossary, 0, context,
+                                        extra_instruction=instruction or None)
+        except (LLMError, OSError, ValueError) as e:
+            self._json({"error": f"重译失败：{e}"}, 500)
+            return
+
+        new = pick_translation(result, src)
+        if not new:
+            self._json({"error": "模型没有返回该条目的译文，请重试或换个要求"}, 502)
+            return
+        with st.lock:
+            st.translations[src] = new
+            if st.paths:
+                Translator._save_progress(st.translations, st.paths["progress"])
+        st.log(f"单条重译：{src[:40]} -> {new[:40]}")
+        self._json({"ok": True, "src": src, "dst": new})
 
     def api_test_llm(self):
         st = STATE
@@ -1032,6 +1094,8 @@ def _serve(port: int, no_browser: bool) -> int:
     paths.ensure_data_dirs()
     if created:
         STATE.log(f"已生成默认配置：{cfg_path}（请到「设置」页填入 API Key）")
+    for note in STATE.cfg.get("_notices", []):
+        STATE.log(note, "warn")
 
     # 可选加固：默认不启用令牌（Host + Origin + X-Frame-Options 已足够，
     # 且令牌会让「浏览器复用旧标签页」变成永久 403 的死局）

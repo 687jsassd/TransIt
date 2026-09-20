@@ -23,7 +23,11 @@ DEFAULT_CONFIG = {
         "concurrency": 6,
         "batch_size": 12,
         "max_retries": 4,
-        "sample_size": 120,
+        # 分析采样量 = 待译条数 × sample_ratio，再夹到 [sample_min, sample_max]。
+        # 旧版固定条数的 sample_size 已废弃（见 load_config 里的迁移处理）。
+        "sample_ratio": 0.10,
+        "sample_min": 200,
+        "sample_max": 1000,
         "output_dir": "output",
     },
     "language": {
@@ -58,6 +62,17 @@ def load_config(path: str = None) -> dict:
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             # 配置损坏不应导致程序无法启动：退回默认值，由调用方提示
             pass
+    # 迁移：旧版 pipeline.sample_size（固定采样条数）已由
+    # sample_ratio + sample_min/max 取代。这里必须删掉它，
+    # 否则老配置里的 sample_size 会一直存在、让人以为新采样策略没生效。
+    # 注意：_notices 是每次加载现算的派生字段，必须先清掉——否则它被存进
+    # config.json 后会在下次加载时被当成用户配置合并回来，逐次累积重复提示。
+    cfg.pop("_notices", None)
+    legacy = cfg.get("pipeline", {}).pop("sample_size", None)
+    if legacy is not None:
+        cfg.setdefault("_notices", []).append(
+            f"配置里的 pipeline.sample_size={legacy} 已废弃（新版按待译条数的比例采样），"
+            f"已忽略；如需固定条数请调整 sample_ratio / sample_min / sample_max")
     # 环境变量覆盖（便于 CI / 不落盘 / 便携版免配置）
     if os.environ.get("TRANSIT_API_KEY"):
         cfg["api"]["api_key"] = os.environ["TRANSIT_API_KEY"]
@@ -72,10 +87,12 @@ def save_config(cfg: dict, path: str = None) -> str:
     """原子写入配置（先写临时文件再替换，避免中断产生半截 JSON）。"""
     path = path or paths.default_config_path()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    # _notices 是加载时现算的派生字段，不写盘（否则会累积重复提示）
+    payload = {k: v for k, v in cfg.items() if k != "_notices"}
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)
     except BaseException:
         try:

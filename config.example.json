@@ -12,7 +12,9 @@
     "concurrency": 6,
     "batch_size": 12,
     "max_retries": 4,
-    "sample_size": 120,
+    "sample_ratio": 0.1,
+    "sample_min": 200,
+    "sample_max": 1000,
     "output_dir": "output"
   },
   "language": {
