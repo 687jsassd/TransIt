@@ -351,7 +351,7 @@ class TransItGUI:
             samples = sample_texts(need, self.cfg)
             self._log(f"采样 {len(samples)}/{len(need)} 条文本，"
                       f"分三阶段分析（世界观 → 角色表 → 术语提取）...")
-            raw = run_analysis(self.llm, samples, self.cfg)
+            raw = run_analysis(self.llm, samples, self.cfg, corpus=list(need.keys()))
             self.glossary = normalize_glossary(raw)
             self._save_glossary_auto()
             self._refresh_glossary_tree()

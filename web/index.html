@@ -121,6 +121,15 @@ td{padding:7px 10px;border-bottom:1px solid rgba(38,45,63,.55);vertical-align:to
 tr:hover td{background:rgba(124,92,255,.05)}
 .tblwrap{max-height:520px;overflow:auto;border:1px solid var(--border);border-radius:10px}
 .tblwrap table{border-collapse:separate;border-spacing:0}
+/* 表格内的下拉框：浏览器给 select 的固有宽度 = 最长选项 + 箭头，列窄了就会被裁掉。
+   这里压掉 padding 与最小宽度，并让单元格不再用 10px 内边距吃掉列宽。 */
+.tblwrap td select, select.cell{
+  width:100%;min-width:0;box-sizing:border-box;
+  padding:2px 4px;font-size:12px;line-height:1.4;
+  background:var(--panel2);color:var(--text);
+  border:1px solid var(--border);border-radius:6px;
+}
+.tblwrap td.cell-tight{padding:4px 4px}
 td.editable{cursor:pointer}
 td.editable:hover{background:rgba(56,189,248,.08)}
 .cat-tag{font-size:11px;padding:2px 8px;border-radius:6px;background:rgba(124,92,255,.15);color:#b7a6ff;white-space:nowrap}
@@ -297,12 +306,16 @@ footer{
     <div class="card" id="gvConflictCard" style="display:none">
       <h3>⚠️ 译法分歧 <span class="badge" id="gvConflictCount">0</span></h3>
       <div class="hint" style="margin-top:0">
-        不同术语块对同一原文给出了不同译法。系统保留了先出现的译法，
-        下面列出被忽略的候选——如果哪个更合适，请在术语表中手改。
+        不同批次的文本对同一个词给出了不同译法。系统默认保留先出现的那个，
+        <b>下面直接点你要采用的那个即可</b>（点完立即保存并生效，不用去词表里手改）。
+        括号里是该译法被提出的次数。
       </div>
-      <div class="tblwrap" style="max-height:220px">
+      <div class="tblwrap" style="max-height:280px">
         <table>
-          <thead><tr><th style="width:110px">分类</th><th style="width:30%">原文</th><th>保留</th><th>被忽略</th><th style="width:60px">次数</th></tr></thead>
+          <thead><tr>
+            <th style="width:110px">分类</th><th style="width:26%">原文</th>
+            <th>候选译法（点击采用）</th>
+          </tr></thead>
           <tbody id="gvConflictBody"></tbody>
         </table>
       </div>
@@ -315,12 +328,12 @@ footer{
         可直接编辑，保存后立即影响后续翻译。
       </div>
       <div class="tblwrap" style="max-height:360px">
-        <table>
+        <table style="table-layout:fixed">
           <thead><tr>
-            <th style="width:14%">原文名</th><th style="width:13%">译名</th>
-            <th style="width:68px">性别</th><th style="width:12%">身份</th>
-            <th style="width:14%">语气</th><th style="width:10%">自称</th>
-            <th style="width:16%">被称呼为</th><th>性格/注意</th>
+            <th style="width:15%">原文名</th><th style="width:14%">译名</th>
+            <th style="width:88px">性别</th><th style="width:12%">身份</th>
+            <th style="width:15%">语气</th><th style="width:10%">自称</th>
+            <th style="width:16%">被称呼为</th><th>性格 / 注意</th>
           </tr></thead>
           <tbody id="gvCharBody"></tbody>
         </table>
@@ -329,6 +342,7 @@ footer{
 
     <div class="card">
       <h3>术语词条 <span class="badge" id="gvCount">0</span></h3>
+      <div id="gvPruned" class="hint" style="margin-top:0;display:none"></div>
       <div class="row" style="margin-bottom:10px">
         <input type="text" id="gvSearch" placeholder="搜索原文/译文…" style="flex:1;max-width:340px">
         <button class="btn sm" id="btnGvAdd">＋ 新增词条</button>
@@ -566,6 +580,7 @@ let S = null;            // /api/state 结果
 let logCursor = 0;
 let settingsFilled = false;
 let gvEditCache = null;  // 术语库编辑缓存 {cat:{src:dst}}
+let loadedHash = undefined;   // 当前已加载工程的 hash（undefined=还没加载过任何文件）
 let rvPage = 1, rvEditingSrc = null;
 
 const TASK_CN = {analyze:"分析建库", translate:"批量翻译", polish:"精修润色", export:"导出"};
@@ -579,6 +594,10 @@ function markOffline(msg){
   if(box.style.display !== "none") return;
   $("offlineMsg").innerHTML = msg;
   box.style.display = "";
+}
+/* 立刻拉一次最新状态并重绘（加载文件后不能等下一次轮询，否则会短暂显示上一个工程） */
+async function refreshState(){
+  try{ S = await api("/api/state"); renderState(); }catch(e){}
 }
 async function pollState(){
   try{
@@ -636,6 +655,21 @@ function stopPolling(){ pollTimers.forEach(t => clearInterval(t)); pollTimers = 
 function renderState(){
   if(!S) return;
   const f = S.file, t = S.task;
+  // ---- 工程（输入文件）切换时，必须清掉所有按工程缓存的前端状态 ----
+  // 否则术语库页面会继续显示上一个工程的词条，一按保存就把 A 的词条写进 B，
+  // 这正是「切换文件后术语库变成别的工程内容」的原因之一。
+  const curHash = f.loaded ? f.hash : null;
+  if(curHash !== loadedHash){
+    const prev = loadedHash;
+    loadedHash = curHash;
+    gvEditCache = null; gvChars = null;      // 术语库/角色表缓存作废
+    rvRows = []; rvCursor = -1; rvPage = 1;  // 修正页回到第一页
+    if(prev !== undefined && curHash){
+      console.log("[TransIt] 工程已切换", prev, "->", curHash);
+    }
+    if($("vGlossary").classList.contains("active")) renderGlossary();
+    if($("vReview").classList.contains("active")) loadEntries();
+  }
   // 设置页可见时刷新采样量预览（加载文件后待译条数会变）
   if($("vSettings") && $("vSettings").classList.contains("active")) updateSamplePreview();
   // 顶栏
@@ -681,6 +715,7 @@ $("btnLoad").onclick = async () => {
   if(!p) return toast("请先选择文件路径");
   try{
     const j = await api("/api/file", {path:p});
+    S = await api("/api/state");
     toast(`已加载：${fmtNum(j.file.total)} 条，待译 ${fmtNum(j.file.need)} 条`);
     renderState();
     renderRecent();
@@ -703,6 +738,7 @@ async function uploadJsonFile(file){
     const content = await file.text();
     const j = await api("/api/upload", {name: file.name, content});
     $("fileInput").value = j.stored_path || "";
+    S = await api("/api/state");
     toast(`✅ 已打开 ${j.name}：${fmtNum(j.file.total)} 条，待译 ${fmtNum(j.file.need)} 条`);
     renderState(); renderRecent();
   }catch(e){ toast("打开失败："+e.message); }
@@ -840,20 +876,78 @@ function renderGlossary(){
   // 角色表（可编辑）
   gvChars = JSON.parse(JSON.stringify(g.characters || []));
   drawGvChars();
-  // 译法分歧
+  // 译法分歧：直接给选项，点一下即采用并保存
   const conf = g.term_conflicts || [];
   $("gvConflictCard").style.display = conf.length ? "" : "none";
   $("gvConflictCount").textContent = conf.length;
   const cb = $("gvConflictBody"); cb.innerHTML = "";
-  conf.forEach(c => {
+  conf.forEach((c, ci) => {
     const tr = document.createElement("tr");
+    const cands = (c.candidates && c.candidates.length)
+      ? c.candidates
+      : [{value: c.kept, count: c.count || 1, is_kept: true},
+         {value: c.dropped, count: c.count || 1, is_kept: false}];   // 兼容旧数据
+    const btns = cands.map(x => {
+      const cur = x.is_kept || x.value === (gvEditCache[c.category] || {})[c.source];
+      return `<button class="btn sm ${cur ? "primary" : ""}" data-ci="${ci}"
+        data-val="${esc(x.value)}" style="margin:2px 4px 2px 0"
+        title="${cur ? "当前采用" : "点击采用这个译法"}"
+        >${cur ? "✓ " : ""}${esc(x.value)}<span style="opacity:.6">(${x.count})</span></button>`;
+    }).join("");
     tr.innerHTML = `<td><span class="cat-tag">${esc(c.category||"")}</span></td>`
-      + `<td>${esc(c.source||"")}</td><td>${esc(c.kept||"")}</td>`
-      + `<td style="color:var(--warn)">${esc(c.dropped||"")}</td>`
-      + `<td>${esc(String(c.count||1))}</td>`;
+      + `<td>${esc(c.source||"")}</td><td>${btns}</td>`;
     cb.appendChild(tr);
   });
+  cb.querySelectorAll("button[data-val]").forEach(b => {
+    b.onclick = () => applyConflict(+b.dataset.ci, b.dataset.val);
+  });
+  // 自动剔除的非术语：只做提示，不需要用户处理
+  const pruned = g.term_pruned || [];
+  const pe = $("gvPruned");
+  if(pruned.length){
+    const byReason = {};
+    pruned.forEach(p => {
+      const k = (p.reason||"").startsWith("fragment") ? "只是更长词条的片段" : "全文里没出现过";
+      byReason[k] = (byReason[k]||0) + 1;
+    });
+    const detail = Object.entries(byReason).map(([k,v]) => `${k} ${v} 条`).join("、");
+    pe.style.display = "";
+    pe.innerHTML = `🧹 分析时已自动剔除 <b>${pruned.length}</b> 条不合格词条（${detail}）——`
+      + `整句和句型不会被当成术语。点此查看：`
+      + `<span style="cursor:pointer;color:var(--accent2)" id="gvPrunedMore">展开</span>`
+      + `<div id="gvPrunedList" style="display:none;margin-top:6px;max-height:140px;overflow:auto">`
+      + pruned.map(p => `· ${esc(p.source||"")} <span style="color:var(--muted)">(${esc(p.reason||"")})</span>`).join("<br>")
+      + `</div>`;
+    const more = $("gvPrunedMore");
+    if(more) more.onclick = () => {
+      const l = $("gvPrunedList");
+      const show = l.style.display === "none";
+      l.style.display = show ? "" : "none";
+      more.textContent = show ? "收起" : "展开";
+    };
+  } else if(pe){
+    pe.style.display = "none";
+  }
   drawGvRows();
+}
+/* 采用某个候选译法：写入词条缓存 -> 立即保存 -> 重绘 */
+async function applyConflict(ci, value){
+  const g = S && S.glossary;
+  const c = g && (g.term_conflicts || [])[ci];
+  if(!c) return;
+  if(!gvEditCache) gvEditCache = JSON.parse(JSON.stringify(g.terms || {}));
+  gvEditCache[c.category] = gvEditCache[c.category] || {};
+  gvEditCache[c.category][c.source] = value;
+  // 本地标记为已采用，避免用户以为没生效
+  (c.candidates || []).forEach(x => { x.is_kept = (x.value === value); });
+  c.kept = value;
+  drawGvRows();
+  try{
+    await api("/api/glossary", {glossary:{terms: gvEditCache}});
+    toast(`已采用「${value}」并保存`);
+    S = await api("/api/state");
+    renderGlossary();
+  }catch(e){ toast("保存失败："+e.message); }
 }
 function drawGvChars(){
   const body = $("gvCharBody"); body.innerHTML = "";
@@ -868,7 +962,8 @@ function drawGvChars(){
     const cell = (f, ph) => {
       const v = c[f] || "";
       if(f === "gender"){
-        return `<td><select class="gv-cf" data-i="${i}" data-f="gender" style="width:100%">`
+        // 用 select.cell 走紧凑样式，避免原生下拉框被列宽裁掉
+        return `<td class="cell-tight"><select class="cell gv-cf" data-i="${i}" data-f="gender">`
           + ["男","女","未知"].map(o => `<option${o===v?" selected":""}>${o}</option>`).join("")
           + `</select></td>`;
       }
@@ -1034,17 +1129,38 @@ function openRvModal(i){
   openModal("rvModal");
   $("rvDstBox").focus();
 }
+/* 只重绘某一行的译文单元格 —— 保存后立刻看到结果，不必重开页面或整表重刷 */
+function paintRvRow(i){
+  const r = rvRows[i];
+  const body = $("rvBody");
+  const tr = body && body.children[i];
+  if(!r || !tr) return;
+  const td = tr.querySelector("td.editable");
+  if(!td) return;
+  const done = r.cat === "need" && r.cur;
+  td.className = "editable " + (done ? "" : "x");
+  td.style.color = done ? "" : "var(--muted)";
+  td.innerHTML = esc(r.cur) || (r.cat === "need"
+    ? "<i>（未翻译，双击填写）</i>" : "<i>（无需翻译）</i>");
+}
 async function saveRv(next){
   try{
-    await api("/api/review", {src: rvEditingSrc, dst: $("rvDstBox").value});
-    if(rvCursor >= 0 && rvRows[rvCursor]) rvRows[rvCursor].cur = $("rvDstBox").value;
-    if(next) toast("已保存");
-    if(next && rvCursor >= 0 && rvCursor + 1 < rvRows.length){
-      openRvModal(rvCursor + 1);
+    const j = await api("/api/review", {src: rvEditingSrc, dst: $("rvDstBox").value});
+    if(rvCursor >= 0 && rvRows[rvCursor]) rvRows[rvCursor].cur = j.dst;
+    paintRvRow(rvCursor);            // 表格立即显示新译文
+    if(next){
+      toast("已保存");
+      if(rvCursor >= 0 && rvCursor + 1 < rvRows.length){
+        openRvModal(rvCursor + 1);
+        return;
+      }
+      closeModal("rvModal");
+      toast("已保存（本页最后一条）");
+      loadEntries();
       return;
     }
     closeModal("rvModal");
-    toast(next ? "已保存（本页最后一条）" : "已保存");
+    toast("已保存");
     loadEntries();
   }catch(e){ toast("保存失败："+e.message); }
 }
@@ -1052,16 +1168,22 @@ async function retransRv(){
   if(rvCursor < 0) return;
   const btn = $("rvRetrans");
   const old = btn.textContent;
-  btn.disabled = true; btn.textContent = "⏳ 重译中…";
+  btn.disabled = true;
+  const t0 = Date.now();
+  // 显示已等待秒数：重译要发一整包上下文，几秒钟是正常的，不要让用户以为卡死
+  const tick = setInterval(() => {
+    btn.textContent = `⏳ 重译中… ${((Date.now() - t0) / 1000).toFixed(0)}s`;
+  }, 200);
   try{
     const j = await api("/api/retranslate", {
       src: rvEditingSrc, current: $("rvDstBox").value, hint: $("rvHint").value,
     });
     $("rvDstBox").value = j.dst;
     if(rvRows[rvCursor]) rvRows[rvCursor].cur = j.dst;
-    toast("重译完成，确认后可保存");
+    paintRvRow(rvCursor);            // 表格同步显示重译结果
+    toast(`重译完成（${j.elapsed ?? ((Date.now() - t0) / 1000).toFixed(1)}s），确认后再点保存`);
   }catch(e){ toast("重译失败："+e.message); }
-  finally{ btn.disabled = false; btn.textContent = old; }
+  finally{ clearInterval(tick); btn.disabled = false; btn.textContent = old; }
 }
 $("btnRvSearch").onclick = () => { rvPage=1; loadEntries(); };
 $("rvSearch").addEventListener("keydown", e => { if(e.key==="Enter"){ rvPage=1; loadEntries(); } });

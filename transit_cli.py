@@ -107,7 +107,7 @@ def cmd_analyze(args, cfg, llm):
     print(f"[analyze] 采样 {len(samples)}/{len(need)} 条"
           f"（比例 {cfg['pipeline'].get('sample_ratio')}, 上下限 "
           f"{cfg['pipeline'].get('sample_min')}~{cfg['pipeline'].get('sample_max')}）")
-    raw = run_analysis(llm, samples, cfg)
+    raw = run_analysis(llm, samples, cfg, corpus=list(need.keys()))
     glossary = normalize_glossary(raw)
 
     paths = make_paths(cfg, input_path, args.out, args.glossary, file_hash(input_path))
@@ -189,7 +189,7 @@ def cmd_run(args, cfg, llm):
     if not os.path.isfile(paths["glossary"]) or args.force_analyze:
         samples = sample_texts(need, cfg)
         print(f"[run] 第一步：分析世界观/角色/术语（采样 {len(samples)}/{len(need)} 条）")
-        raw = run_analysis(llm, samples, cfg)
+        raw = run_analysis(llm, samples, cfg, corpus=list(need.keys()))
         glossary = normalize_glossary(raw)
         save_glossary(glossary, paths["glossary"])
         n_terms = sum(len(v) for v in glossary["terms"].values())

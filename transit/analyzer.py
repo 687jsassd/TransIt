@@ -159,11 +159,13 @@ def _render_blocks(blocks: list) -> str:
 
 
 def run_analysis(llm: LLMClient, samples: list, cfg: dict, stop_check=None,
-                 step_cb=None) -> dict:
+                 step_cb=None, corpus: list = None) -> dict:
     """执行分析，返回 glossary dict。
 
     stop_check: 可选回调，返回 True 表示用户请求停止（抛 TaskStopped）。
     step_cb:    可选回调，每完成一个请求（阶段）调用一次，供 UI 推进进度条。
+    corpus:     待译文本全集（不只是采样样本）。用于校验术语表：
+                剔除全文里不存在的、以及只是更长词条片段的条目。
     三个阶段各自失败自动重试（最多 max_retries 次）。
 
     这是分析流程的**唯一实现**：CLI / WebUI / tkinter 界面都走这里，
@@ -211,27 +213,41 @@ def run_analysis(llm: LLMClient, samples: list, cfg: dict, stop_check=None,
     chunks = [samples[i:i + chunk_size] for i in range(0, len(samples), chunk_size)]
     print(f"[analyze] 阶段3/3：术语提取（{len(chunks)} 块）")
     merged_terms = {}
-    conflicts = []
+    tally = {}
     # 角色表里的名字先入表，作为权威译名，后续各块不得覆盖
     if characters:
         char_terms = {c["name"]: c["reading"] for c in characters
                       if c.get("name") and c.get("reading")}
         if char_terms:
-            merged_terms.setdefault("角色名", {}).update(char_terms)
+            _merge_terms(merged_terms, {"角色名": char_terms}, "角色表", tally)
     for ci, chunk in enumerate(chunks):
         chunk_terms = _retry(
             lambda c=chunk, i=ci: _request_terms(llm, c, lang, i + 1, len(chunks), characters),
             f"术语块 {ci + 1}")
-        _merge_terms(merged_terms, chunk_terms or {}, f"块{ci + 1}", conflicts)
+        _merge_terms(merged_terms, chunk_terms or {}, f"块{ci + 1}", tally)
 
+    # ---- 用全文校验术语表：剔除幻觉条目与「只是更长词条片段」的条目 ----
+    pruned = []
+    if corpus:
+        keep = {c["name"] for c in characters if c.get("name")}
+        merged_terms, pruned = prune_terms(merged_terms, "\n".join(corpus), keep)
+        if pruned:
+            reasons = {}
+            for p in pruned:
+                key = "全文未出现" if p["reason"] == "not_in_text" else "只是更长词条的片段"
+                reasons[key] = reasons.get(key, 0) + 1
+            detail = "、".join(f"{k} {v} 条" for k, v in reasons.items())
+            print(f"[analyze] 已自动剔除 {len(pruned)} 条非术语（{detail}）")
+            for p in pruned[:5]:
+                print(f"    - {p['source'][:40]}（{p['reason']}）")
+
+    conflicts = build_conflicts(merged_terms, tally)
     if conflicts:
-        # 出现次数多的排在前面：越是反复冲突的译法越值得人工裁决
-        conflicts.sort(key=lambda c: -c.get("count", 1))
-        print(f"[analyze] 注意：{len(conflicts)} 处译法分歧（已保留先出现的译法，"
-              f"可在术语库页面核对）")
+        print(f"[analyze] {len(conflicts)} 处译法分歧（保留了先出现的译法，"
+              f"可在术语库页面点选要采用哪个）")
         for c in conflicts[:5]:
-            print(f"    {c['source']}: 保留「{c['kept']}」，忽略"
-                  f"「{c['dropped']}」×{c.get('count', 1)}（{c['from']}）")
+            cands = "、".join(f"「{x['value']}」×{x['count']}" for x in c["candidates"])
+            print(f"    {c['source']}: {cands}")
 
     return {
         "worldview": (worldview or {}).get("worldview", ""),
@@ -242,6 +258,7 @@ def run_analysis(llm: LLMClient, samples: list, cfg: dict, stop_check=None,
         "characters": characters if isinstance(characters, list) else [],
         "terms": merged_terms,
         "term_conflicts": conflicts,
+        "term_pruned": pruned,
     }
 
 
@@ -251,11 +268,14 @@ def analysis_requests(sample_count: int) -> int:
     return 2 + chunks  # 世界观 + 角色表 + 术语块
 
 
-def _merge_terms(merged: dict, incoming: dict, source_label: str, conflicts: list) -> None:
-    """合并一块术语。同一原文出现不同译法时**保留先出现的**并记录分歧。
+def _merge_terms(merged: dict, incoming: dict, source_label: str,
+                 tally: dict) -> None:
+    """合并一块术语，并为每个原文累计各候选译法的票数。
 
-    原实现是后块直接覆盖前块，等于随机丢掉先前的译法；现在改为保留 + 上报，
-    让用户能在术语库页面看到分歧并自行裁决。
+    合并策略：同一原文出现不同译法时**保留先出现的**（角色表里的正式译名会最先入表，
+    因此它是权威的，后续各块改不动）。
+    票数记在 tally 里，供事后生成「译法分歧」——界面可以据此直接给出候选项，
+    而不是让用户自己去词表里翻。
     """
     for cat, mapping in (incoming or {}).items():
         if not isinstance(mapping, dict):
@@ -267,23 +287,31 @@ def _merge_terms(merged: dict, incoming: dict, source_label: str, conflicts: lis
             s, d = src.strip(), dst.strip()
             if not d:
                 continue
-            if s in bucket:
-                if bucket[s] != d:
-                    _record_conflict(conflicts, cat, s, bucket[s], d, source_label)
-            else:
-                bucket[s] = d
+            votes = tally.setdefault((cat, s), {})
+            votes[d] = votes.get(d, 0) + 1
+            bucket.setdefault(s, d)
 
 
-def _record_conflict(conflicts: list, category: str, source: str,
-                     kept: str, dropped: str, source_label: str) -> None:
-    """记录译法分歧。同一分歧在多块里重复出现时只累加次数，不重复列出。"""
-    for c in conflicts:
-        if (c["category"] == category and c["source"] == source
-                and c["kept"] == kept and c["dropped"] == dropped):
-            c["count"] = c.get("count", 1) + 1
-            return
-    conflicts.append({"category": category, "source": source, "kept": kept,
-                      "dropped": dropped, "from": source_label, "count": 1})
+def build_conflicts(merged: dict, tally: dict) -> list:
+    """由票数统计生成分歧列表（只有出现多种译法的条目才算分歧）。
+
+    结构设计成界面可以直接渲染成选项按钮：
+      {"category","source","kept","count","candidates":[{"value","count","is_kept"}]}
+    """
+    out = []
+    for (cat, src), votes in tally.items():
+        if len(votes) < 2:
+            continue
+        kept = (merged.get(cat) or {}).get(src)
+        if kept is None:
+            continue
+        cands = sorted(({"value": v, "count": c, "is_kept": v == kept}
+                        for v, c in votes.items()),
+                       key=lambda x: (not x["is_kept"], -x["count"], x["value"]))
+        out.append({"category": cat, "source": src, "kept": kept,
+                    "count": sum(votes.values()), "candidates": cands})
+    out.sort(key=lambda c: -c["count"])
+    return out
 
 
 def _request_worldview(llm: LLMClient, blocks: list, lang: dict) -> dict:
@@ -452,7 +480,16 @@ def _request_terms(llm: LLMClient, chunk: list, lang: dict, idx: int, total: int
 }}
 
 【约束】
-- 只收有实义的名词/术语，不收语法词尾、助词（ます/です/に/を 等）。
+- 只收**名词性**的专有名词/术语，只收有实义的名词/术语，不收语法词尾、助词（ます/です/に/を 等）。
+- **绝对不要收完整句子或有谓语的短语**。反例（这类一律不要）：
+  「指定したステータス項目を、ステータス画面と装備画面に表示しないようにします。」
+  「〜してください」「〜してもよろしいですか」——带 します/する/です/ください/ません 结尾的都是句子。
+- **长度上限 {MAX_TERM_LEN} 个字符**。超过这个长度的基本是句子，不要收。
+- **不要收更短的前缀/片段**：如果一个词总是出现在另一个更长的词里面（例如已有「バイドーラ」，
+  就不要单独收「バイド」；已有「フレイラ」「フレイガ」，就不要单独收「フレイ」），
+  只收那个完整、能独立使用的词。
+- 不要把一个词的不同变形各收一条（如 フレイ/フレイラ/フレイガ 若实为同一招式系列，
+  只收实际在文本中独立出现的那几个）。
 - 译法必须纯净，禁止括号注释/注音/解释（如「小穴（俗语）」禁止，只写「小穴」）。
 - 音译用常见字，不用生僻字；角色名按角色气质选译。
 - 上面已给出的角色译名不要重复列出。
@@ -495,6 +532,9 @@ def normalize_glossary(raw: dict) -> dict:
     conflicts = raw.get("term_conflicts")
     if isinstance(conflicts, list):
         out["term_conflicts"] = [c for c in conflicts if isinstance(c, dict)]
+    pruned = raw.get("term_pruned")
+    if isinstance(pruned, list):
+        out["term_pruned"] = [p for p in pruned if isinstance(p, dict)]
     terms = raw.get("terms", {})
     if isinstance(terms, dict):
         for cat, mapping in terms.items():
@@ -559,15 +599,16 @@ def _strip_paren_annotations(dst: str) -> str:
 
 
 def _is_valid_term(src: str, dst: str) -> bool:
-    """过滤无效词条：语法词尾、空、纯助词等。"""
+    """过滤无效词条：语法词尾、空、纯助词、整句等。"""
     s = src.strip()
     if not s or len(s) > 60:
         return False
     if s in _JAPANESE_GRAMMAR_TERMS:
         return False
+    if _looks_like_sentence(s):
+        return False
     # 原文=译文 且 无实义（纯假名短词、单个符号）
     if s == dst:
-        import re
         # 纯假名（无汉字/无字母）且短于4字：如 ます、にゃ——这类没有翻译意义
         if re.fullmatch(r"[ぁ-んァ-ヶー～〜]+", s) and len(s) <= 4:
             return False
@@ -575,6 +616,96 @@ def _is_valid_term(src: str, dst: str) -> bool:
         if re.fullmatch(r"[♡♥☆★※◆◇■□○●〜～・…、。！？!?]+", s):
             return False
     return True
+
+
+#: 术语长度上限。真实专有名词极少超过这个长度，超出的基本是整句被误收
+MAX_TERM_LEN = 24
+_SENTENCE_TAIL_RE = re.compile(r"[。．.！？!?、，,；;：:]$")
+_SENTENCE_INNER_RE = re.compile(r"[。．！？!?、，,；;]")
+_PREDICATE_TAIL_RE = re.compile(
+    r"(します|しました|しません|する|した|しない|です|でした|である|ています|"
+    r"ている|ください|ません|ましょう|られる|させる|なります|あります|います)$")
+_PARTICLE_RE = re.compile(r"[をにがはでとへもやの]")
+
+
+def _looks_like_sentence(s: str) -> bool:
+    """判断这更像「一整句话」而不是「术语」。
+
+    实测模型会把整句塞进「特殊用语/口癖」，例如：
+        指定したステータス項目を、ステータス画面と装備画面に表示しないようにします。
+    以及把句型占位当词条：〜してください
+    这类条目注入翻译提示词只会误导模型，必须在入库前挡掉。
+    """
+    if len(s) > MAX_TERM_LEN:
+        return True
+    # 波浪线是「〜する」这类句型占位符，不是可翻译的术语
+    if "〜" in s or "～" in s:
+        return True
+    if _SENTENCE_TAIL_RE.search(s):
+        return True
+    if len(s) > 10 and _SENTENCE_INNER_RE.search(s):
+        return True
+    # 谓语/助动词结尾：术语极少以 します/する/です/ください 结尾，
+    # 这类基本是句子或动词短语（如「セーブします」「〜を表示しないようにします」）
+    if _PREDICATE_TAIL_RE.search(s) and len(s) >= 4:
+        return True
+    # 多个助词 + 谓语（上面没覆盖到的形态）
+    if len(_PARTICLE_RE.findall(s)) >= 2 and _PREDICATE_TAIL_RE.search(s):
+        return True
+    return False
+
+
+def prune_terms(terms: dict, corpus: str, keep: set = None) -> tuple:
+    """用**全文**校验术语表，返回 (清洗后的 terms, 被剔除条目列表)。
+
+    两条规则：
+      1. 全文里一次都没出现的条目 —— 多半是模型编的，剔除
+      2. 只作为更长条目「片段」出现的条目 —— 如已有「バイドーラ」时单收的「バイド」、
+         已有「フレイラ」「フレイガ」时单收的「フレイ」。
+         判据：该词在全文中的出现次数，减去所有包含它的更长条目的出现次数后 <= 0，
+         说明它从来没有独立出现过，是碎片而非独立术语。
+    这类碎片留在库里有害：翻译时按子串匹配注入，一条含「バイドーラ」的文本会同时
+    命中「バイド」和「バイドーラ」，给出互相矛盾的译名要求。
+
+    keep: 不参与剔除的条目（如角色表里的正式译名）。
+    """
+    if not corpus:
+        return terms, []
+    keep = keep or set()
+    pruned = []
+
+    # 规则 1：全文未出现
+    for cat in list(terms.keys()):
+        bucket = terms[cat]
+        for src in list(bucket.keys()):
+            if src in keep:
+                continue
+            if corpus.count(src) == 0:
+                pruned.append({"source": src, "category": cat, "reason": "not_in_text"})
+                del bucket[src]
+        if not bucket:
+            del terms[cat]
+
+    # 规则 2：只是更长条目的片段
+    flat = [(cat, src) for cat, bucket in terms.items() for src in bucket]
+    sources = [s for _, s in flat]
+    for cat, src in flat:
+        if src in keep:
+            continue
+        longer = [t for t in sources if t != src and src in t and len(t) > len(src)]
+        if not longer:
+            continue
+        total = corpus.count(src)
+        covered = sum(corpus.count(t) for t in longer)
+        if total - covered <= 0:
+            pruned.append({"source": src, "category": cat,
+                           "reason": "fragment_of:" + longer[0]})
+            del terms[cat][src]
+    for cat in list(terms.keys()):
+        if not terms[cat]:
+            del terms[cat]
+
+    return terms, pruned
 
 
 def save_glossary(glossary: dict, path: str) -> None:

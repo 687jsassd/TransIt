@@ -88,15 +88,82 @@ def render_context_block(context_lines: list) -> str:
     return "\n".join(parts)
 
 
+def filter_characters_for_batch(characters: list, batch: list,
+                                context_lines: list = None,
+                                max_chars: int = 8, always: int = 4) -> list:
+    """挑出与本批文本相关的角色，避免把整个角色表塞进每次请求。
+
+    实测整个角色表占了单条重译提示词的 59%（30 个角色 2,817 字符），
+    而那一行的原文里一个角色名都没出现 —— 纯浪费，直接拖慢响应。
+    策略：先收本批/邻行里出现过的角色；再补上始终保留的「主要角色」
+    （通常是主角团，最可能被代词或戏份间接引用），总数封顶 max_chars。
+    """
+    if not characters:
+        return []
+    text = "\n".join(list(batch) + [c[1] for c in (context_lines or [])])
+    picked, seen = [], set()
+    for c in characters:
+        name = c.get("name") or ""
+        keys = [name, c.get("reading") or "", c.get("called_by_others") or ""]
+        if name and any(k and k in text for k in keys):
+            picked.append(c)
+            seen.add(name)
+    for c in characters[:always]:
+        if c.get("name") and c["name"] not in seen:
+            picked.append(c)
+            seen.add(c["name"])
+    return picked[:max_chars]
+
+
+def _render_characters(characters: list) -> str:
+    """把角色表渲染成提示词块。"""
+    char_lines = []
+    for c in characters:
+        if not isinstance(c, dict) or not c.get("name"):
+            continue
+        pairs = [
+            ("gender", "性别"), ("role", "身份"), ("personality", "性格"),
+            ("speech_style", "语气"), ("first_person", "自称"),
+            ("called_by_others", "被称呼为"),
+        ]
+        detail = " | ".join(f"{label}: {c[k]}" for k, label in pairs if c.get(k))
+        head = f"{c['name']} = {c.get('reading') or c['name']}"
+        char_lines.append(f"- {head}" + (f" | {detail}" if detail else ""))
+        if c.get("notes"):
+            char_lines.append(f"    注意: {c['notes']}")
+    if not char_lines:
+        return ""
+    return ("【角色表】（对白必须贴合各角色的性别、身份与语气；"
+            "中文第三人称按「性别」选他/她；自称与称呼方式要与表中一致）\n"
+            + "\n".join(char_lines))
+
+
+#: 完整版硬性规则（批量翻译用）
+_FULL_RULES = '【硬性规则】\n1. 逐条翻译，输出 JSON 对象，键=原文（必须与输入完全一致，一个字符都不能改），值=翻译后的中文。\n2. 占位符/控制符必须原样保留在译文中：<SG...> 标签、\\n 换行符、\\v[数字] 变量、{数字} 等。\n3. 专有名词（角色名、物品名、势力名、专业术语）必须使用术语库译法；若原文在术语库中，译文必须与库中一致。\n4. 翻译要自然流畅，符合中文游戏文本习惯；对话要符合角色语气；成人场景要保留原文的情色氛围与露骨程度。\n5. 数字、数值、牌名后的 " : 数字" 映射保持原样。\n6. 原文若包含换行（\\n），译文中也要保留相应的换行结构。\n7. 【纯中文约束】译文必须是规范简体中文：除占位符（<SG...>、\\n、\\v[数字]）、数字、以及\n   MAP001/EV001 这类代码标识外，不得残留任何日文假名、日文字、英文单词或字母串。\n   术语库中的英文缩写（如 HOP）可保留原样。\n8. 【禁止括号注释】译文不得添加原文没有的括号、括注、注释或解释性文字\n   （如「小穴（女性生殖器俗语）」这种一律禁止）；原文本身含括号的除外。\n9. 【游戏语境】这是游戏内文本（界面/剧情/对话/系统提示），不是操作系统或硬件文本：\n   UI 词如 閉じる/クローズ/オフ 应译为"关闭/关掉"而非"关机/关闭电源"；\n   术语按游戏界面习惯（选项/菜单/设置 等语境）。\n10. 【句子碎片】原文常被 mtool 按行截断成碎片，单行可能不是完整句。\n    翻译单行时参考【行上下文】理解它属于哪句话；若该行是句子的中间片段，\n    译文要作为片段自然衔接（可用"的/了/然后"等连接词或保持句读节奏），\n    不要硬补成完整句，也不要脱离上下文臆测。\n11. 输出 ONLY 一个 JSON 对象，不要任何解释、注释或围栏。'
+
+#: 精简模式保留的硬性规则（单条重译用；完整规则见 build_translate_prompt 的默认分支）
+_COMPACT_RULES = """【硬性规则】
+1. 只输出这一条的译文；输出 JSON 对象，键=原文（必须与输入完全一致），值=译文。
+2. 占位符/控制符必须原样保留：<SG...> 标签、\\n 换行符、\\v[数字] 变量、{数字} 等。
+3. 专有名词必须使用上面术语表的译法，不得自行更改。
+4. 译文必须是规范简体中文；除占位符、数字、MAP001 这类代码标识外不得残留日文假名。
+5. 不得添加原文没有的括号注释或解释。原文若被 mtool 截断成碎片，译文也保持片段形态。
+6. 输出 ONLY 一个 JSON 对象，不要任何解释或围栏。"""
+
+
 def build_translate_prompt(batch: list, glossary: dict, cfg: dict, batch_no: int = 0,
                            context_lines: list = None,
-                           extra_instruction: str = None) -> list:
+                           extra_instruction: str = None,
+                           compact: bool = False) -> list:
     """构造翻译用 messages：系统提示含世界观+术语库，用户消息含待译文本。
 
     context_lines: 邻行上下文（[(行号, 原文, 是否本批待译), ...]），
     提供原文行序上下文，缓解 mtool 按行截断导致的语义割裂。
     extra_instruction: 本次调用的一次性附加要求（如单条重译时用户给的修改意见），
     只影响这一批，不写入配置。
+    compact: 精简模式，用于**单条重译**。逐条重译时固定上下文会吃掉几乎全部 token
+    （实测 4,747 字符里只有 22 字符是待译文本，其中角色表独占 59%），
+    把角色表按相关性裁剪、长文本截断、规则精简后，提示词能降到三分之一左右。
     """
     lang = cfg["language"]
     tcfg = cfg.get("translation", {})
@@ -151,25 +218,12 @@ def build_translate_prompt(batch: list, glossary: dict, cfg: dict, batch_no: int
     if notes:
         ctx_parts.append(f"【翻译注意】{notes}")
     # 角色表：对白翻译最关键的上下文（性别→他/她、自称、语气、称呼关系）
-    char_lines = []
-    for c in characters:
-        if not isinstance(c, dict) or not c.get("name"):
-            continue
-        pairs = [
-            ("gender", "性别"), ("role", "身份"), ("personality", "性格"),
-            ("speech_style", "语气"), ("first_person", "自称"),
-            ("called_by_others", "被称呼为"),
-        ]
-        detail = " | ".join(f"{label}: {c[k]}" for k, label in pairs if c.get(k))
-        head = f"{c['name']} = {c.get('reading') or c['name']}"
-        char_lines.append(f"- {head}" + (f" | {detail}" if detail else ""))
-        if c.get("notes"):
-            char_lines.append(f"    注意: {c['notes']}")
-    if char_lines:
-        ctx_parts.append(
-            "【角色表】（对白必须贴合各角色的性别、身份与语气；"
-            "中文第三人称按「性别」选他/她；自称与称呼方式要与表中一致）\n"
-            + "\n".join(char_lines))
+    # 精简模式下按相关性裁剪，否则单条重译会把整表塞进去
+    if compact:
+        characters = filter_characters_for_batch(characters, batch, context_lines)
+    char_block = _render_characters(characters)
+    if char_block:
+        ctx_parts.append(char_block)
     ctx_block = "\n".join(ctx_parts)
 
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(batch))
@@ -218,6 +272,9 @@ def build_translate_prompt(batch: list, glossary: dict, cfg: dict, batch_no: int
         "你的翻译要忠实、自然、符合目标语言的游戏语境，专有名词必须严格使用给定的术语库，"
         "保持全篇一致。"
     )
+    # 硬性规则段：完整版用于批量翻译，精简版用于单条重译（见 _COMPACT_RULES）
+    rules_block = _COMPACT_RULES if compact else _FULL_RULES
+
     user = f"""请将下面的 {len(batch)} 条游戏文本从日语精翻为{target_note}。
 
 【翻译上下文】
@@ -234,26 +291,7 @@ def build_translate_prompt(batch: list, glossary: dict, cfg: dict, batch_no: int
 3. 日式称呼（ちゃん/くん/さん/さま）要自然融入译名：ちゃん→"酱/小"，さん→"先生/小姐"（或省略）。
 4. 与既有术语库冲突时，以术语库为准。
 
-【硬性规则】
-1. 逐条翻译，输出 JSON 对象，键=原文（必须与输入完全一致，一个字符都不能改），值=翻译后的中文。
-2. 占位符/控制符必须原样保留在译文中：<SG...> 标签、\\n 换行符、\\v[数字] 变量、{{数字}} 等。
-3. 专有名词（角色名、物品名、势力名、专业术语）必须使用术语库译法；若原文在术语库中，译文必须与库中一致。
-4. 翻译要自然流畅，符合中文游戏文本习惯；对话要符合角色语气；成人场景要保留原文的情色氛围与露骨程度。
-5. 数字、数值、牌名后的 " : 数字" 映射保持原样。
-6. 原文若包含换行（\\n），译文中也要保留相应的换行结构。
-7. 【纯中文约束】译文必须是规范简体中文：除占位符（<SG...>、\\n、\\v[数字]）、数字、以及
-   MAP001/EV001 这类代码标识外，不得残留任何日文假名、日文字、英文单词或字母串。
-   术语库中的英文缩写（如 HOP）可保留原样。
-8. 【禁止括号注释】译文不得添加原文没有的括号、括注、注释或解释性文字
-   （如「小穴（女性生殖器俗语）」这种一律禁止）；原文本身含括号的除外。
-9. 【游戏语境】这是游戏内文本（界面/剧情/对话/系统提示），不是操作系统或硬件文本：
-   UI 词如 閉じる/クローズ/オフ 应译为"关闭/关掉"而非"关机/关闭电源"；
-   术语按游戏界面习惯（选项/菜单/设置 等语境）。
-10. 【句子碎片】原文常被 mtool 按行截断成碎片，单行可能不是完整句。
-    翻译单行时参考【行上下文】理解它属于哪句话；若该行是句子的中间片段，
-    译文要作为片段自然衔接（可用"的/了/然后"等连接词或保持句读节奏），
-    不要硬补成完整句，也不要脱离上下文臆测。
-11. 输出 ONLY 一个 JSON 对象，不要任何解释、注释或围栏。"""
+{rules_block}"""
     if custom_prompt:
         user += f"\n\n【用户附加要求】\n{custom_prompt}"
     if extra_instruction and extra_instruction.strip():
@@ -354,15 +392,19 @@ class Translator:
 
     def translate_batch(self, batch: list, glossary: dict, batch_no: int = 0,
                         context_lines: list = None,
-                        extra_instruction: str = None) -> dict:
+                        extra_instruction: str = None,
+                        compact: bool = False,
+                        max_tokens: int = None) -> dict:
         """翻译一个批次，返回 {原文: 译文}。
 
         context_lines: 邻行上下文（组合句子翻译），None 则纯按行翻译。
         extra_instruction: 本次调用的一次性附加要求（不写入配置）。
+        compact: 精简提示词（单条重译用，实测可省约 2/3 字符）。
+        max_tokens: 覆盖输出上限；单条重译没必要用配置里那个很大的值。
         """
         messages = build_translate_prompt(batch, glossary, self.cfg, batch_no,
-                                          context_lines, extra_instruction)
-        result = self.llm.chat_json(messages)
+                                          context_lines, extra_instruction, compact)
+        result = self.llm.chat_json(messages, max_tokens=max_tokens)
         if not isinstance(result, dict):
             raise LLMError(f"batch {batch_no}: result not an object")
         return result

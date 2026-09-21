@@ -295,6 +295,8 @@ def glossary_payload(st: AppState):
         "register_guide": g.get("register_guide", {}) or {},
         "characters": g.get("characters", []) or [],
         "term_conflicts": g.get("term_conflicts", []) or [],
+        # 自动剔除的非术语（整句/片段/幻觉）—— 让用户知道有东西被丢掉了，可追溯
+        "term_pruned": g.get("term_pruned", []) or [],
         "terms": terms,
         "categories": list(terms.keys()),
         "terms_count": sum(len(v) for v in terms.values() if isinstance(v, dict)),
@@ -345,10 +347,42 @@ def _make_llm(st: AppState) -> LLMClient:
     return llm
 
 
+# ---------------- 工程（输入文件）身份守卫 ----------------
+class ProjectChanged(RuntimeError):
+    """任务执行期间用户切换了输入文件 —— 结果不能再写回。"""
+
+
+def _snapshot_project(st):
+    """把当前「工程」的身份快照下来：hash + 输出路径 + 术语库路径。
+
+    任务必须用**启动时**的快照，不能在跑完之后再读 st.paths/st.src_hash ——
+    否则用户在分析 A 的过程中载入 B，A 的术语库就会写进 B 的文件，
+    同时内存里的 glossary 是 A 的、data 是 B 的，表现为「术语库变成别的工程的内容」。
+    """
+    with st.lock:
+        return {
+            "hash": st.src_hash,
+            "paths": dict(st.paths) if st.paths else None,
+            "glossary": st.glossary,
+            "data_keys": list(st.data.keys()) if st.data else [],
+        }
+
+
+def _assert_same_project(st, snap, what="任务"):
+    """写回前校验工程没变；变了就抛错并**不写任何文件**。"""
+    with st.lock:
+        cur = st.src_hash
+    if cur != snap["hash"]:
+        raise ProjectChanged(
+            f"{what}期间输入文件已被切换（{snap['hash']} → {cur}），"
+            f"本次结果已丢弃，以免写入错误工程。请重新运行。")
+
+
 def task_analyze():
     st = STATE
     if not st.data:
         raise RuntimeError("请先加载输入文件")
+    snap = _snapshot_project(st)
     need = st.groups["need_translate"]
     llm = _make_llm(st)
     p = st.cfg["pipeline"]
@@ -366,9 +400,10 @@ def task_analyze():
         st.update_progress(done_steps[0], total_steps, 0)
 
     raw = run_analysis(llm, samples, st.cfg, stop_check=st.stop_event.is_set,
-                       step_cb=step_cb)
+                       step_cb=step_cb, corpus=list(need.keys()))
     glossary = normalize_glossary(raw)
-    paths = st.paths
+    _assert_same_project(st, snap, "分析")
+    paths = snap["paths"]
     save_glossary(glossary, paths["glossary"])
     with st.lock:
         st.glossary = glossary
@@ -377,10 +412,14 @@ def task_analyze():
     n_chars = len(glossary.get("characters") or [])
     st.log(f"分析完成：术语库 {n_terms} 词条 | 角色表 {n_chars} 人 -> {paths['glossary']}")
     st.log(f"世界观: {glossary.get('worldview', '')[:160]}")
+    pruned = glossary.get("term_pruned") or []
+    if pruned:
+        st.log(f"已自动剔除 {len(pruned)} 条非术语（整句/片段/全文不存在），"
+               f"详见 glossary.json 的 term_pruned", "warn")
     conflicts = glossary.get("term_conflicts") or []
     if conflicts:
-        st.log(f"发现 {len(conflicts)} 处译法分歧（已保留先出现的译法，"
-               f"可在「术语库」页核对）", "warn")
+        st.log(f"发现 {len(conflicts)} 处译法分歧 —— 到「术语库」页可直接点选采用哪个",
+               "warn")
     st.update_progress(total_steps, total_steps, 0)
 
 
@@ -392,6 +431,7 @@ def task_translate(limit: int = 0, do_polish: bool = False):
     st = STATE
     if not st.data:
         raise RuntimeError("请先加载输入文件")
+    snap = _snapshot_project(st)
     llm = _make_llm(st)
     glossary = st.glossary
     if not glossary:
@@ -401,7 +441,8 @@ def task_translate(limit: int = 0, do_polish: bool = False):
         keys = list(need.keys())[:limit]
         need = {k: need[k] for k in keys}
         st.log(f"测试模式：只翻译前 {limit} 条")
-    paths = st.paths
+    paths = snap["paths"]
+    all_keys = list(snap["data_keys"])
     tr = Translator(llm, st.cfg)
     tcfg = st.cfg.get("translation", {})
     ctx_win = int(tcfg.get("context_window", 3) or 0)
@@ -418,10 +459,11 @@ def task_translate(limit: int = 0, do_polish: bool = False):
     result = tr.run(
         need, glossary, paths["progress"],
         on_progress=on_progress,
-        all_keys=list(st.data.keys()),
+        all_keys=all_keys,
         context_window=ctx_win,
         stop_check=st.stop_event.is_set,
     )
+    _assert_same_project(st, snap, "翻译")
     with st.lock:
         st.translations = result
     st.log(f"翻译完成：共 {len(result)} 条译文。{llm.usage_report()}")
@@ -447,6 +489,7 @@ def task_polish_all():
     st = STATE
     if not st.data:
         raise RuntimeError("请先加载输入文件")
+    snap = _snapshot_project(st)
     llm = _make_llm(st)
     glossary = st.glossary
     if not glossary:
@@ -455,8 +498,8 @@ def task_polish_all():
         translations = dict(st.translations)
     if not translations:
         # 从进度文件载入
-        if st.paths and os.path.isfile(st.paths["progress"]):
-            with open(st.paths["progress"], encoding="utf-8") as f:
+        if snap["paths"] and os.path.isfile(snap["paths"]["progress"]):
+            with open(snap["paths"]["progress"], encoding="utf-8") as f:
                 translations = json.load(f)
     if not translations:
         raise RuntimeError("没有可精修的译文，请先翻译")
@@ -469,9 +512,10 @@ def task_polish_all():
 
     n = tr.polish(translations, glossary, st.cfg, threshold=threshold,
                   on_progress=on_polish)
+    _assert_same_project(st, snap, "精修")
     with st.lock:
         st.translations.update(translations)
-    Translator._save_progress(translations, st.paths["progress"])
+    Translator._save_progress(translations, snap["paths"]["progress"])
     st.log(f"精修完成：润色 {n} 条，进度已保存")
 
 
@@ -479,16 +523,17 @@ def task_export():
     st = STATE
     if not st.data:
         raise RuntimeError("请先加载输入文件")
+    snap = _snapshot_project(st)
     with st.lock:
         translations = dict(st.translations)
     # 若内存为空，从进度文件恢复
-    if not translations and st.paths and os.path.isfile(st.paths["progress"]):
-        with open(st.paths["progress"], encoding="utf-8") as f:
+    if not translations and snap["paths"] and os.path.isfile(snap["paths"]["progress"]):
+        with open(snap["paths"]["progress"], encoding="utf-8") as f:
             translations = json.load(f)
         with st.lock:
             st.translations = translations
-    out = export_file(st.data, st.groups, translations, st.paths["output"])
-    st.log(f"导出完成：{st.paths['output']}（共 {len(out)} 条）")
+    out = export_file(st.data, st.groups, translations, snap["paths"]["output"])
+    st.log(f"导出完成：{snap['paths']['output']}（共 {len(out)} 条）")
 
 
 # ---------------- HTTP Handler ----------------
@@ -762,10 +807,27 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
+    def _busy_reason(self):
+        """有任务在跑时不允许切换工程 —— 否则任务的写回会落到新工程上。
+
+        这一层是「防呆」；任务内部还有 _assert_same_project 兜底，
+        两道加起来才能保证不会把 A 的术语库写成 B 的。
+        """
+        with STATE.lock:
+            if STATE.task.get("status") == "running":
+                t = STATE.task.get("type") or "任务"
+                return (f"有任务正在运行（{t}），切换文件会让它的结果写错地方。"
+                        f"请先点「停止」或等它跑完再切换。")
+        return None
+
     def api_load_file(self, body):
         p = (body.get("path") or "").strip().strip('"')
         if not p:
             self._json({"error": "路径为空"}, 400)
+            return
+        busy = self._busy_reason()
+        if busy:
+            self._json({"error": busy}, 409)
             return
         err = self._do_load(p)
         if err:
@@ -775,6 +837,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_upload(self, body):
         """上传文件内容（浏览器 <input type=file> / 拖拽），落到 uploads/ 后加载。"""
+        busy = self._busy_reason()
+        if busy:
+            self._json({"error": busy}, 409)
+            return
         name = (body.get("name") or "uploaded.json").strip()
         name = os.path.basename(name) or "uploaded.json"
         content = body.get("content")
@@ -946,9 +1012,10 @@ class Handler(BaseHTTPRequestHandler):
             if not st.paths:
                 self._json({"error": "未加载文件"}, 400)
                 return
+            progress = st.paths["progress"]
             st.translations[src] = str(dst)
-            Translator._save_progress(st.translations, st.paths["progress"])
-        self._json({"ok": True})
+            Translator._save_progress(st.translations, progress)
+        self._json({"ok": True, "src": src, "dst": str(dst)})
 
     def api_entries(self):
         st = STATE
@@ -1025,12 +1092,14 @@ class Handler(BaseHTTPRequestHandler):
             if not st.glossary:
                 self._json({"error": "没有术语库，请先运行分析"}, 400)
                 return
-            all_keys = list(st.data.keys())
+            snap = _snapshot_project(st)
+            all_keys = snap["data_keys"]
             glossary = st.glossary
             cfg = st.cfg
         hint = str(body.get("hint") or "")[:1500]
         current = str(body.get("current") or "")
 
+        t0 = time.time()
         try:
             llm = _make_llm(st)
             tr = Translator(llm, cfg)
@@ -1044,22 +1113,30 @@ class Handler(BaseHTTPRequestHandler):
                 instruction += f"上一版译文是：「{current}」，请给出更好的版本。"
             if hint.strip():
                 instruction += f"\n本次修改要求：{hint}"
+            # compact=True：单条重译时固定上下文会占掉 99% 的 token
+            # （角色表一项就占 59%），裁剪后实测提示词小 68%、响应明显更快。
+            # max_tokens 也收紧：一条译文不需要配置里那个很大的输出上限。
             result = tr.translate_batch([src], glossary, 0, context,
-                                        extra_instruction=instruction or None)
+                                        extra_instruction=instruction or None,
+                                        compact=True, max_tokens=2048)
         except (LLMError, OSError, ValueError) as e:
-            self._json({"error": f"重译失败：{e}"}, 500)
+            self._json({"error": f"重译失败（耗时 {time.time() - t0:.1f}s）：{e}"}, 500)
             return
+        elapsed = time.time() - t0
 
         new = pick_translation(result, src)
         if not new:
-            self._json({"error": "模型没有返回该条目的译文，请重试或换个要求"}, 502)
+            self._json({"error": f"模型没有返回该条目的译文（耗时 {elapsed:.1f}s），"
+                                 f"请重试或换个要求"}, 502)
             return
+        _assert_same_project(st, snap, "重译")
         with st.lock:
             st.translations[src] = new
-            if st.paths:
-                Translator._save_progress(st.translations, st.paths["progress"])
-        st.log(f"单条重译：{src[:40]} -> {new[:40]}")
-        self._json({"ok": True, "src": src, "dst": new})
+            Translator._save_progress(st.translations, snap["paths"]["progress"])
+        st.log(f"单条重译（{elapsed:.1f}s）：{src[:40]} -> {new[:40]}")
+        self._json({"ok": True, "src": src, "dst": new,
+                    "elapsed": round(elapsed, 1),
+                    "tokens": llm.total_prompt_tokens + llm.total_completion_tokens})
 
     def api_test_llm(self):
         st = STATE
