@@ -41,7 +41,8 @@ from transit.analyzer import (
     sample_texts, run_analysis, normalize_glossary,
     save_glossary, load_glossary, TaskStopped, analysis_requests,
 )
-from transit.translator import Translator, build_contextual_batches, pick_translation
+from transit.translator import (Translator, build_contextual_batches, pick_translation,
+                                _merge_translations)
 from transit.writer import export_file
 
 CONFIG_PATH = paths.default_config_path()
@@ -423,6 +424,92 @@ def task_analyze():
     st.update_progress(total_steps, total_steps, 0)
 
 
+def task_retranslate_selected(srcs, hint=""):
+    """批量重译选中的条目。
+
+    为什么需要：批量翻译里偶有顽固条目（多行长文本居多）失败，逐条点「重译」太累。
+    这里把选中的条目按**小批**送去重译 —— 批比正常翻译更小，因为顽固条目基本是
+    多行长文本，小批（尤其单条）下模型更容易逐条认真处理；整批里仍失败的条目
+    会再单独试一次。
+    """
+    st = STATE
+    if not st.data:
+        raise RuntimeError("请先加载输入文件")
+    snap = _snapshot_project(st)
+    glossary = st.glossary
+    if not glossary:
+        raise RuntimeError("没有术语库，请先运行分析")
+    llm = _make_llm(st)
+    tr = Translator(llm, st.cfg)
+    all_keys = list(snap["data_keys"])
+    with st.lock:
+        known = set(st.data.keys())
+    todo = [s for s in srcs if s in known]
+    if not todo:
+        raise RuntimeError("没有选中任何可重译的条目")
+
+    cfg_bs = int(st.cfg.get("pipeline", {}).get("batch_size", 12) or 12)
+    bs = max(1, min(cfg_bs, 4))
+    window = int(st.cfg.get("translation", {}).get("context_window", 3) or 0)
+    instruction = (hint or "").strip() or None
+    total = len(todo)
+    st.log(f"批量重译：{total} 条（批大小 {bs}"
+           + (f"，附加要求：{instruction[:40]}" if instruction else "") + "）")
+    st.update_progress(0, total, 0)
+
+    ok_n = 0
+    fail_n = 0
+
+    def _ctx(keys):
+        return (build_contextual_batches(keys, all_keys, len(keys), window)[0][1]
+                if window > 0 else None)
+
+    def _store(mapping):
+        with st.lock:
+            for k, v in mapping.items():
+                st.translations[k] = v
+            Translator._save_progress(st.translations, snap["paths"]["progress"])
+
+    for i in range(0, total, bs):
+        if st.stop_event.is_set():
+            raise TaskStopped("用户停止了任务")
+        # 每个小批写回前都校验工程没变（切换已被接口层挡住，这里是兜底）
+        _assert_same_project(st, snap, "批量重译")
+        chunk = todo[i:i + bs]
+        try:
+            result = tr.translate_batch(chunk, glossary, i // bs, _ctx(chunk),
+                                        extra_instruction=instruction)
+        except (LLMError, OSError, ValueError) as e:
+            st.log(f"重译第 {i // bs + 1} 批失败（{len(chunk)} 条）：{e}", "warn")
+            result = {}
+        out = {}
+        _merge_translations(chunk, result, out, [])
+        if out:
+            _store(out)
+            ok_n += len(out)
+        for k in [c for c in chunk if c not in out]:
+            # 整批里没匹配上的再单独试一次 —— 单条最容易成功
+            if st.stop_event.is_set():
+                raise TaskStopped("用户停止了任务")
+            try:
+                one = tr.translate_batch([k], glossary, 0, _ctx([k]),
+                                         extra_instruction=instruction)
+                single = pick_translation(one, k)
+            except (LLMError, OSError, ValueError):
+                single = ""
+            if single:
+                _store({k: single})
+                ok_n += 1
+            else:
+                fail_n += 1
+                st.log(f"仍无法重译：{k[:50]}", "warn")
+        st.update_progress(ok_n + fail_n, total, fail_n)
+
+    st.log(f"批量重译完成：成功 {ok_n}/{total} 条"
+           + (f"，仍失败 {fail_n} 条（可在弹窗里附上修改要求再单独重试）" if fail_n else ""))
+    st.update_progress(total, total, fail_n)
+
+
 def st_log(msg, level="info"):
     STATE.log(msg, level)
 
@@ -739,6 +826,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.api_review_edit(body)
             elif route == "/api/retranslate":
                 self.api_retranslate(body)
+            elif route == "/api/retranslate_selected":
+                self.api_retranslate_selected(body)
             elif route == "/api/test":
                 self.api_test_llm()
             else:
@@ -1137,6 +1226,32 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True, "src": src, "dst": new,
                     "elapsed": round(elapsed, 1),
                     "tokens": llm.total_prompt_tokens + llm.total_completion_tokens})
+
+    def api_retranslate_selected(self, body):
+        """批量重译选中的条目（后台任务，进度走既有任务面板）。"""
+        raw = body.get("srcs")
+        if not isinstance(raw, list) or not raw:
+            self._json({"error": "没有选中任何条目"}, 400)
+            return
+        st = STATE
+        with st.lock:
+            if not st.data:
+                self._json({"error": "未加载文件"}, 400)
+                return
+            known = set(st.data.keys())
+        srcs = [str(s) for s in raw if str(s) in known]
+        if not srcs:
+            self._json({"error": "选中的条目都不在当前文件中"}, 400)
+            return
+        if len(srcs) > 2000:
+            self._json({"error": f"一次最多重译 2000 条（当前 {len(srcs)} 条）"}, 400)
+            return
+        hint = str(body.get("hint") or "")[:1500]
+        ok, msg = STATE.start_task(
+            "retranslate", lambda: task_retranslate_selected(srcs, hint),
+            f"批量重译 {len(srcs)} 条")
+        self._json({"ok": ok, "error": msg, "count": len(srcs)},
+                   200 if ok else 409)
 
     def api_test_llm(self):
         st = STATE

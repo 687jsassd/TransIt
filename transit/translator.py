@@ -12,6 +12,7 @@
 """
 import json
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -226,7 +227,6 @@ def build_translate_prompt(batch: list, glossary: dict, cfg: dict, batch_no: int
         ctx_parts.append(char_block)
     ctx_block = "\n".join(ctx_parts)
 
-    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(batch))
     # 专有名词风格规则（用户可选：auto/kawaii/simple/transliterate）
     name_style_rules = {
         "kawaii": (
@@ -305,23 +305,45 @@ def build_translate_prompt(batch: list, glossary: dict, cfg: dict, batch_no: int
             "用于理解语义。[待译]=本批要翻译的行，[邻行]=仅供参考不要翻译。\n"
             f"{ctx_block_text}"
         )
-
-    user += f"\n\n【待翻译文本】\n{numbered}"
+    # 待译文本用 <<<n>>> 分隔符而不是「1. 」编号：
+    # 原文常含换行与空行（多行长文本），用「n. 」前缀时模型无法判断一条从哪结束，
+    # 容易把相邻条目并成一条、或把前缀当成原文的一部分，导致键对不上、译文被丢弃。
+    numbered = "\n".join(f"<<<{i + 1}>>>\n{t}" for i, t in enumerate(batch))
+    user += (
+        "\n\n【待翻译文本】每条原文以 <<<编号>>> 单独一行开始，到下一条 <<<编号>>> 之前结束"
+        "（**包含中间的所有换行与空行**）。JSON 的键必须是从 <<<编号>>> 的下一行起、"
+        "到下一条 <<<编号>>> 之前的全部内容，逐字照抄：不要把 <<<编号>>> 本身写进键里，"
+        "也不要漏掉或多加换行与空行。\n"
+        f"{numbered}"
+    )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+#: 归一化时应当忽略的空白字符（含各类换行与全角空格）
+_WS_CHARS = frozenset(" \t\r\n\v\f\u3000\u00a0\u1680\u2000\u2001\u2002\u2003"
+                      "\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029"
+                      "\u202f\u205f\u3000\ufeff")
+#: 字面量的换行转义（mtool 有些文件用 \n 表示换行，而非真实换行符）
+_ESC_NEWLINE_RE = re.compile(r"\\[nrt]")
+
+
 def _norm_key(s: str) -> str:
-    """键归一化：全角→半角、去空白，用于模糊匹配。"""
+    """键归一化：全角→半角、去掉**所有空白（含换行）**，用于容错匹配。
+
+    换行必须算作空白。多行原文（如「ラベルを貼るための\\nもの。」）在模型返回时
+    经常被改成空格、直接删掉、换成全角空格或字面量的 \\n —— 旧实现只去掉空格与
+    全角空格，于是这些条目一律匹配不上：译文被丢弃、收敛轮又用同样的批次重试，
+    表现就是「批量翻译没有结果，单句也不行」。实测 25 种换行偏差里有 21 种丢译文。
+    """
     out = []
     for ch in s:
         code = ord(ch)
-        if code == 0x3000:
-            out.append(" ")
-        elif 0xFF01 <= code <= 0xFF5E:
+        if 0xFF01 <= code <= 0xFF5E:
             out.append(chr(code - 0xFEE0))
         else:
             out.append(ch)
-    return "".join(out).replace(" ", "").replace("\u3000", "")
+    t = _ESC_NEWLINE_RE.sub("", "".join(out))
+    return "".join(ch for ch in t if ch not in _WS_CHARS)
 
 
 def _merge_translations(batch: list, result: dict, out: dict, warnings: list) -> int:
@@ -329,20 +351,34 @@ def _merge_translations(batch: list, result: dict, out: dict, warnings: list) ->
 
     容错策略（模型偶尔会漏译或微改键）：
     1. 精确匹配
-    2. 归一化匹配（全角/半角/空白）
+    2. 归一化匹配（全角/半角、所有空白与换行）
     3. 仍未匹配的键【不做顺序对齐】——留给上层收敛轮重译。
        顺序对齐曾在模型输出顺序与输入不一致时造成键值错位（严重质量事故），
        错译比漏译危害大得多：漏译会重试，错译会静默进入成品。
+    归一化匹配只在**无歧义**时启用：若本批内有两个原文归一化后相同，
+    或模型对同一归一化键返回了不同译文，就放弃归一化匹配，避免张冠李戴。
     """
     ok = 0
-    result_norm = {_norm_key(k): v for k, v in result.items() if isinstance(v, str)}
     unmatched = []
+    # 本批内每个归一化键对应几个原文（>1 说明归一化有歧义）
+    norm_of = {}
+    for src in batch:
+        norm_of.setdefault(_norm_key(src), []).append(src)
+    # 模型返回的每个归一化键对应几个译文
+    result_norm = {}
+    for k, v in result.items():
+        if isinstance(v, str):
+            result_norm.setdefault(_norm_key(k), []).append(v)
+
     for src in batch:
         val = None
         if src in result and isinstance(result[src], str):
             val = result[src]
-        elif _norm_key(src) in result_norm:
-            val = result_norm[_norm_key(src)]
+        else:
+            nk = _norm_key(src)
+            cands = result_norm.get(nk)
+            if cands and len(cands) == 1 and len(norm_of.get(nk, ())) == 1:
+                val = cands[0]
         if val is not None and val.strip():
             # 校验占位符保留
             src_ph = PLACEHOLDER_RE.findall(src)
@@ -511,11 +547,18 @@ class Translator:
             still_missing = [k for k in pending if k not in done]
             if not still_missing:
                 break
-            print(f"\n[translate] 第 {round_no} 轮收敛：补译漏译 {len(still_missing)} 条...")
+            # 批次逐轮缩小，最后一轮每条单独成批。
+            # 顽固条目多是多行长文本，在小批（尤其单条）里模型更容易逐条认真处理 ——
+            # 这与"手动单句重译反而能成功"是同一个道理。
+            # 旧实现每轮都用同样的 batch_size，等于原样重试，注定连失败三次。
+            retry_size = 1 if round_no >= 3 else max(1, batch_size >> round_no)
+            print(f"\n[translate] 第 {round_no} 轮收敛：补译漏译 {len(still_missing)} 条"
+                  f"（批大小 {retry_size}）...")
             if use_ctx:
-                retry_batches = build_contextual_batches(still_missing, list(all_keys), batch_size, context_window)
+                retry_batches = build_contextual_batches(still_missing, list(all_keys),
+                                                         retry_size, context_window)
             else:
-                retry_batches = [(b, None) for b in self.split_batches(still_missing, batch_size)]
+                retry_batches = [(b, None) for b in self.split_batches(still_missing, retry_size)]
             with ThreadPoolExecutor(max_workers=concurrency) as ex:
                 futures = {ex.submit(work, i, b): i for i, b in enumerate(retry_batches)}
                 for fut in as_completed(futures):

@@ -377,9 +377,21 @@ footer{
         <span class="kv" id="rvTotal"></span>
       </div>
       <div class="kv" id="rvStats" style="margin-bottom:8px;font-size:12px"></div>
+      <div class="row" style="margin-bottom:8px;flex-wrap:wrap;gap:6px">
+        <span class="kv" id="rvSelInfo">已选 0 条</span>
+        <button class="btn sm primary" id="btnRvBatch">🤖 重译选中</button>
+        <input type="text" id="rvBatchHint" placeholder="批量要求（可选，如：全部改口语化一点）"
+               style="flex:1;min-width:200px;max-width:380px">
+        <button class="btn sm" id="btnRvSelFail">选中本页未翻译</button>
+        <button class="btn sm" id="btnRvSelNone">清除选择</button>
+      </div>
       <div class="tblwrap">
         <table>
-          <thead><tr><th style="width:72px">分类</th><th style="width:40%">原文</th><th>当前译文（双击编辑）</th></tr></thead>
+          <thead><tr>
+            <th style="width:34px"><input type="checkbox" id="rvChkAll"></th>
+            <th style="width:72px">分类</th><th style="width:38%">原文</th>
+            <th>当前译文（双击编辑）</th>
+          </tr></thead>
           <tbody id="rvBody"></tbody>
         </table>
       </div>
@@ -583,7 +595,8 @@ let gvEditCache = null;  // 术语库编辑缓存 {cat:{src:dst}}
 let loadedHash = undefined;   // 当前已加载工程的 hash（undefined=还没加载过任何文件）
 let rvPage = 1, rvEditingSrc = null;
 
-const TASK_CN = {analyze:"分析建库", translate:"批量翻译", polish:"精修润色", export:"导出"};
+const TASK_CN = {analyze:"分析建库", translate:"批量翻译", polish:"精修润色",
+                 export:"导出", retranslate:"批量重译"};
 const STATUS_CN = {idle:"待命", running:"运行中", done:"已完成", stopped:"已停止", error:"失败"};
 const STATUS_COLOR = {idle:"#8b93a7", running:"#38bdf8", done:"#34d399", stopped:"#fbbf24", error:"#f87171"};
 
@@ -672,6 +685,16 @@ function renderState(){
   }
   // 设置页可见时刷新采样量预览（加载文件后待译条数会变）
   if($("vSettings") && $("vSettings").classList.contains("active")) updateSamplePreview();
+  // 批量重译任务刚跑完 -> 自动刷新修正页，不必手动切页签
+  if(t.status !== lastTaskStatus){
+    if(lastTaskStatus === "running" && t.type === "retranslate"
+       && (t.status === "done" || t.status === "stopped" || t.status === "error")){
+      rvBatchPending = false;
+      if($("vReview").classList.contains("active")) loadEntries();
+      toast(`批量重译结束：成功 ${fmtNum(t.done)} / ${fmtNum(t.total)} 条`);
+    }
+    lastTaskStatus = t.status;
+  }
   // 顶栏
   $("hdTask").textContent = (t.status==="running"?"⏳ ":"")+STATUS_CN[t.status] + (t.status==="running" && t.type ? ` · ${TASK_CN[t.type]||t.type}` : "");
   $("hdModel").textContent = S.config.api.model || "";
@@ -1096,23 +1119,39 @@ async function loadEntries(){
       + ` ｜ 原样保留 ${fmtNum(st.passthrough||0)}`;
     $("rvPage").textContent = `第 ${j.page} / ${Math.max(1, Math.ceil(j.total/j.page_size))} 页`;
     rvRows = j.rows || []; rvCursor = -1;
+    const chkAll = $("rvChkAll"); if(chkAll) chkAll.checked = false;
     const body = $("rvBody"); body.innerHTML = "";
     if(!rvRows.length){
-      body.innerHTML = `<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:30px">无匹配条目</td></tr>`;
+      body.innerHTML = `<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:30px">无匹配条目</td></tr>`;
+      updateRvSelInfo();
       return;
     }
     rvRows.forEach((r, i) => {
       const cat = RV_CAT[r.cat] || {label:r.cat, tip:""};
       const tr = document.createElement("tr");
       const done = r.cat === "need" && r.cur;
-      tr.innerHTML = `<td><span class="cat-tag" title="${esc(cat.tip)}">${esc(cat.label)}</span></td>`
+      const dis = r.cat === "passthrough" ? " disabled" : "";
+      tr.innerHTML = `<td><input type="checkbox" class="rv-chk" data-i="${i}"`
+        + `${r.sel ? " checked" : ""}${dis} style="accent-color:var(--accent)"></td>`
+        + `<td><span class="cat-tag" title="${esc(cat.tip)}">${esc(cat.label)}</span></td>`
         + `<td>${esc(r.src)}</td>`
         + `<td class="editable ${done?"":"x"}" style="${done?"":"color:var(--muted)"}">`
         + `${esc(r.cur) || (r.cat==="need" ? "<i>（未翻译，双击填写）</i>" : "<i>（无需翻译）</i>")}</td>`;
       tr.querySelector("td.editable").ondblclick = () => openRvModal(i);
+      const chk = tr.querySelector(".rv-chk");
+      if(chk) chk.onchange = () => { rvRows[i].sel = chk.checked; updateRvSelInfo(); };
       body.appendChild(tr);
     });
+    updateRvSelInfo();
   }catch(e){ toast("加载条目失败："+e.message); }
+}
+function rvSelected(){ return rvRows.filter(r => r.sel).map(r => r.src); }
+function updateRvSelInfo(){
+  const n = rvSelected().length;
+  const el = $("rvSelInfo");
+  if(el) el.textContent = `已选 ${n} 条`;
+  const b = $("btnRvBatch");
+  if(b) b.disabled = n === 0;
 }
 function openRvModal(i){
   const r = rvRows[i];
@@ -1185,6 +1224,46 @@ async function retransRv(){
   }catch(e){ toast("重译失败："+e.message); }
   finally{ clearInterval(tick); btn.disabled = false; btn.textContent = old; }
 }
+/* 多选批量重译：顽固条目（多行长文本）单独点太累，选一片一起送 */
+$("rvChkAll").onchange = e => {
+  rvRows.forEach(r => { if(r.cat !== "passthrough") r.sel = e.target.checked; });
+  document.querySelectorAll(".rv-chk").forEach((c, i) => {
+    const row = rvRows[+c.dataset.i];
+    if(row) c.checked = !!row.sel;
+  });
+  updateRvSelInfo();
+};
+$("btnRvSelNone").onclick = () => {
+  rvRows.forEach(r => { r.sel = false; });
+  document.querySelectorAll(".rv-chk").forEach(c => c.checked = false);
+  const all = $("rvChkAll"); if(all) all.checked = false;
+  updateRvSelInfo();
+};
+$("btnRvSelFail").onclick = () => {
+  let n = 0;
+  rvRows.forEach(r => {
+    const miss = (r.cat === "need" && !r.cur);
+    r.sel = miss; if(miss) n++;
+  });
+  document.querySelectorAll(".rv-chk").forEach(c => {
+    const row = rvRows[+c.dataset.i]; if(row) c.checked = !!row.sel;
+  });
+  const all = $("rvChkAll"); if(all) all.checked = false;
+  updateRvSelInfo();
+  toast(n ? `已选中本页 ${n} 条未翻译` : "本页没有未翻译的条目");
+};
+$("btnRvBatch").onclick = async () => {
+  const srcs = rvSelected();
+  if(!srcs.length) return toast("请先勾选要重译的条目");
+  if(!confirm(`确定重译选中的 ${srcs.length} 条吗？\n\n· 会按小批逐条送模型，进度显示在「工作台」\n· 已有译文会被覆盖，完成后本页自动刷新`)) return;
+  try{
+    const j = await api("/api/retranslate_selected", {srcs, hint: $("rvBatchHint").value||""});
+    toast(`已提交 ${j.count} 条，重译中…（可在「工作台」看进度）`);
+    rvBatchPending = true;
+  }catch(e){ toast("提交失败："+e.message); }
+};
+/* 批任务结束后自动刷新列表：轮询里检测到 retranslate 任务从 running 变完成 */
+let rvBatchPending = false, lastTaskStatus = "";
 $("btnRvSearch").onclick = () => { rvPage=1; loadEntries(); };
 $("rvSearch").addEventListener("keydown", e => { if(e.key==="Enter"){ rvPage=1; loadEntries(); } });
 $("rvUntrans").onchange = () => { rvPage=1; loadEntries(); };
