@@ -112,10 +112,57 @@ class LLMClient:
         return self.chat(messages)
 
 
-def parse_json(text: str) -> dict:
-    """解析模型输出中的 JSON。容忍 ```json 围栏、前后杂质、截断。
+#: 控制字符 → JSON 转义
+_CTRL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t",
+                 "\b": "\\b", "\f": "\\f", "\v": "\\u000b", "\0": "\\u0000"}
 
-    失败时尝试多种修复：截取 {..} 范围、截断补全（引号/括号）、单引号替换。
+
+def escape_raw_controls(s: str) -> str:
+    """把 JSON **字符串字面量内部**未转义的控制字符转义掉。
+
+    模型在键/值含换行时会直接把换行、回车原样写进 JSON 字符串 —— 这在 JSON 规范里
+    非法（控制字符必须转义），json.loads 会报 "Invalid control character"。
+    实测报错形如：
+
+        '{"もし文字がはみ出てたら横幅を制限\\r\\r（横拡大率を下げる": "..."}'
+
+    这段 JSON 的引号/冒号/花括号都齐全，结构完全正确，唯一的问题就是字符串里有
+    真实回车符。多行原文（尤其含空行的）特别容易触发。
+
+    只在字符串内部转义；字符串外的换行（正常的 JSON 缩进）原样保留，
+    因此对合法 JSON 是无害的空操作。
+    """
+    out = []
+    in_str = False
+    escaped = False
+    for ch in s:
+        if not in_str:
+            out.append(ch)
+            if ch == '"':
+                in_str = True
+            continue
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            out.append(ch)
+            escaped = True
+        elif ch == '"':
+            out.append(ch)
+            in_str = False
+        elif ord(ch) < 0x20:
+            out.append(_CTRL_ESCAPES.get(ch, "\\u%04x" % ord(ch)))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def parse_json(text: str) -> dict:
+    """解析模型输出中的 JSON。容忍 ```json 围栏、前后杂质、截断、未转义控制字符。
+
+    失败时尝试多种修复：截取 {..} 范围、截断补全（引号/括号）、
+    转义字符串内未转义的控制字符、单引号替换。
     """
     t = text.strip()
     # 去掉围栏
@@ -137,19 +184,23 @@ def parse_json(text: str) -> dict:
         if s2 != -1 and e2 > s2:
             candidates.append(repaired[s2:e2 + 1])
     for cand in candidates:
-        try:
-            return json.loads(cand)
-        except json.JSONDecodeError:
-            continue
+        # 先原样试，再试「转义掉字符串内控制字符」的版本：
+        # 多行原文会让模型把真实换行/回车写进 JSON 字符串，结构没问题但 json 非法
+        for variant in (cand, escape_raw_controls(cand)):
+            try:
+                return json.loads(variant)
+            except json.JSONDecodeError:
+                continue
     # 最后手段：单引号替换为双引号（模型偶尔用单引号）
     if "'" in t:
         t2 = t.replace("'", '"')
         s3, e3 = t2.find("{"), t2.rfind("}")
         if s3 != -1 and e3 > s3:
-            try:
-                return json.loads(t2[s3:e3 + 1])
-            except json.JSONDecodeError:
-                pass
+            for variant in (t2[s3:e3 + 1], escape_raw_controls(t2[s3:e3 + 1])):
+                try:
+                    return json.loads(variant)
+                except json.JSONDecodeError:
+                    continue
     raise LLMError(f"cannot parse JSON from model output: {text[:500]!r}")
 
 
